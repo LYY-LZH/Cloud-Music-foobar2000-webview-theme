@@ -77,39 +77,70 @@
     return (title || '') + '|' + paths.length + '|' + (paths[0] || '') + '|' + (paths[paths.length - 1] || '');
   }
 
+  /* 视图重建串行化：replaceAllAndPlay 要把整张视图写进上下文歌单（三千首时宿主
+     会有明显停顿），连点几行会并发叠起多份重建请求，宿主 UI 被拖住 —— 表现就是
+     "操作一快就卡死"。同一时刻只跑一份重建，在途期间的点击只记下最后一次。 */
+  var ctxBusy = false;
+  var ctxWaiting = null;
+
   /* 播放一个「视图列表」（列表行双击 / 播放全部共用）：
      视图 → 上下文歌单（整体重建）→ 定位播放 → 清空插队队列。
+     startIndex 是**视图里的原始行下标**（含没有路径的条目），这里换算成上下文
+     歌单里的行号；null / 越界 = 从第一首有效曲目开始。
      opts.queueClear === false 时不动插队队列；opts.onDone(ok) 回结果。 */
   CM.playContextList = function(tracks, startIndex, title, opts) {
     opts = opts || {};
-    var paths = CM.trackPaths(tracks || []);
+    var plan = CM.trackPathPlan(tracks || []);
+    var paths = plan.paths;
     if (!paths.length) {
       CM.showToast('无法播放', '未找到有效文件路径', 'error');
       if (opts.onDone) opts.onDone(false);
       return;
     }
-    if (startIndex == null || startIndex < 0 || startIndex >= paths.length) startIndex = 0;
+    var rowIndex = (startIndex == null || startIndex < 0) ? null : startIndex;
+    var mapped = rowIndex == null ? 0 : plan.sourceIndex.indexOf(rowIndex);
+    if (mapped < 0) {
+      // 点的那一行没有可用路径：旧实现会把它从 paths 里滤掉，于是"点这首播那首"
+      // （整份列表往后挪一位）。这里宁可报错，也不能悄悄播到别的曲目上。
+      CM.showToast('无法播放这一首', '这一行没有可用的文件路径（可能已从媒体库移除）', 'error');
+      if (opts.onDone) opts.onDone(false);
+      return;
+    }
+    startIndex = mapped;
     var sig = ctxSig(title, paths);
+    if (ctxBusy) {
+      ctxWaiting = { tracks: tracks, index: rowIndex, title: title, opts: opts };
+      return;
+    }
+    ctxBusy = true;
     // 歌单被锁定 / 参数被拒等：按错误码给一句能照着做的话，不静默
     function finish(ok, resp) {
+      ctxBusy = false;
+      var next = ctxWaiting;
+      ctxWaiting = null;
       if (!ok) {
         var code = resp && resp.code;
         var sub = (resp && resp.error) || CM.errText(code) || '宿主拒绝了这次播放请求';
         if (code === 'LOCKED') sub = '「' + CM.CONTEXT_PLAYLIST + '」被锁定，请在 foobar2000 中解锁后再试';
         CM.showToast('播放失败', sub, 'error');
         if (opts.onDone) opts.onDone(false);
+        if (next) CM.playContextList(next.tracks, next.index, next.title, next.opts);
         return;
       }
       CM._ctxSynced = { sig: sig, title: title || '' };
       if (opts.queueClear !== false) CM.clearUpNext();
       if (opts.onDone) opts.onDone(true);
+      if (next) CM.playContextList(next.tracks, next.index, next.title, next.opts);
     }
     CM.ensureContextPlaylist().then(function(idx) {
       if (idx == null || idx < 0) { finish(false, null); return; }
       function replaceAll() {
         CM.api('playlist.replaceAllAndPlay', {
           playlist: idx, paths: paths, playIndex: startIndex, autoPlay: true, stopFirst: true
-        }).then(function(r) { finish(!(r && r.success === false), r); });
+        }).then(function(r) { finish(!(r && r.success === false), r); },
+          // invoke 本身 reject（桥接超时 / 方法不存在）时也要收尾：
+          // 否则 ctxBusy 永远是 true，之后每一行双击都被塞进 ctxWaiting 再也不播
+          function(e) { finish(false, { error: (e && e.message) || '宿主无响应' }); });
       }
       // 同一份视图、且上下文歌单已在活动位：只定位播放 ——
       // 避免"在同一列表里连点几首"每次都把歌单清空重填（播放列表会被反复重建）
@@ -119,7 +150,7 @@
           if (act === idx) {
             CM.api('playlist.playTrack', { playlist: idx, index: startIndex }).then(function(r) {
               finish(!(r && r.success === false), r);
-            });
+            }, function(e) { finish(false, { error: (e && e.message) || '宿主无响应' }); });
           } else {
             replaceAll();
           }
@@ -127,7 +158,7 @@
         return;
       }
       replaceAll();
-    });
+    }, function(e) { finish(false, { error: (e && e.message) || '建不出上下文歌单' }); });
   };
 
   // 清空插队队列（切换上下文时调用；宿主清空只影响"待播"项，不会打断当前曲目）
@@ -149,33 +180,230 @@
       playPlaylistRow(o.playlist, o.index);
       return;
     }
-    if (o.tracks && o.tracks.length) { CM.playContextList(o.tracks, o.index || 0, o.title); return; }
+    if (o.tracks && o.tracks.length) {
+      CM.playContextList(o.tracks, o.index == null ? null : o.index, o.title);
+      return;
+    }
     CM.playNowPath(o.path);
   };
 
   // 歌单行播放：只在活动歌单不是它时才 setActive ——
   // setActive 会触发 playlist:activated → 整表重载，重载期间行级操作被守卫挡住
   // （表现为"点完一首马上双击/右键另一首没反应"），而且 playTrack 本身就会让该歌单成为活动歌单
+  //
+  // 行里存的是在线直链时先刷新一次：QQ vkey 约两小时、网易云 CDN 签名同样有期限，
+  // 过期后宿主拿到就打不开、直接跳到下一首。刷新后地址变了就走"游离曲"播放（
+  // 歌单里的旧行原样保留，不为了换一条直链去删改用户歌单）；刷新不出来就明说，
+  // 不让 foobar 去静默跳歌。
   function playPlaylistRow(plIndex, rowIndex) {
-    CM.api('playlist.getActive').then(function (a) {
-      var act = a && (a.index != null ? a.index : a.playlist);
-      if (act === plIndex) return null;
-      return CM.apiOr('playlist.setActive', { playlist: plIndex });
-    }).then(function () {
-      return CM.apiOr('playlist.playTrack', { playlist: plIndex, index: rowIndex });
-    }).then(function () {
-      CM.clearUpNext();
-    }, function (e) { CM.failToast(e, '播放失败'); });
+    function startRow() {
+      CM.api('playlist.getActive').then(function (a) {
+        var act = a && (a.index != null ? a.index : a.playlist);
+        if (act === plIndex) return null;
+        return CM.apiOr('playlist.setActive', { playlist: plIndex });
+      }).then(function () {
+        return CM.apiOr('playlist.playTrack', { playlist: plIndex, index: rowIndex });
+      }).then(function () {
+        CM.clearUpNext();
+      }, function (e) { CM.failToast(e, '播放失败'); });
+    }
+    CM.api('playlist.getTracksAt', { playlist: plIndex, rows: [rowIndex] }).then(function (r) {
+      var path = CM.trackPath(CM.respTracks(r)[0]);
+      if (!path || !CM.isUrlPath(path)) { startRow(); return; }
+      CM.ensureOnlinePath(path).then(function (rr) {
+        if (!rr.path) {
+          CM.showToast('这首在线曲目打不开', rr.error || '直链已失效', 'error');
+          return;
+        }
+        // 地址没变（本来就新鲜 / 解析出来是同一个）→ 交给宿主播歌单里那一行，
+        // 播放上下文保持不变；地址换了才走"游离曲"，歌单里的旧行原样留着
+        if (!rr.refreshed) { startRow(); return; }
+        CM.playFreshPath(rr.path);
+      });
+    }, startRow);
   }
+
+  /* ============================================
+   * 在线直链：播放前要不要重新解析？
+   * ============================================
+   * 写进歌单 / 播放历史的都是**带签名和时效**的地址（B 站 deadline 2 小时、
+   * QQ vkey 约两小时、网易云 CDN 签名更短），过期即 403。死链交给宿主 =
+   * foobar 打不开 = 它自己跳下一首（用户看到的就是"晴天还没开始就跳成别的歌"）。
+   *
+   * 但"每首都先解析一次再播"是拿延迟换稳定性：B 站要两个往返（view + playurl），
+   * 刚搜出来就播的常见场景纯属白等。所以先判断这条还能用多久：
+   *   · B 站：直链自带 `deadline=<unix 秒>`（实测 = 签发时刻 + 2 小时），精确可得；
+   *   · 网易云 / QQ：直链本身没有到期时间，用桥接记下的签发时间 ts + 保守余量；
+   *   · 判不了（映射被裁掉 / 改过地址）：按"不确定"处理，仍然解析一次。
+   * 新鲜 → 直接播（零额外延迟）；过期 → 解析（一个往返），结果缓存 2 分钟，
+   * 连点 / 重播 / 按下鼠标的预取都不会重复请求。
+   * ============================================ */
+  var FRESH_MARGIN = 3 * 60 * 1000;                 // 到期前 3 分钟就当作已过期
+  var FRESH_WINDOW = { qq: 100 * 60 * 1000, netease: 30 * 60 * 1000 };
+  var FRESH_CACHE_MS = 120 * 1000;                  // 刚解析出的结果复用 2 分钟
+  var _freshCache = Object.create(null);            // 原路径 → {url, at}
+  var _freshPending = Object.create(null);          // 原路径 → Promise（并发去重）
+
+  /* 这条直链的签发时间（毫秒；认不出 = 0） */
+  CM.onlineIssuedAt = function(path) {
+    var p = String(path || '');
+    try {
+      if (window.BilibiliBridge && BilibiliBridge.pathIssuedAt &&
+          BilibiliBridge.isBiliUrl && BilibiliBridge.isBiliUrl(p)) {
+        return BilibiliBridge.pathIssuedAt(p) || 0;
+      }
+      if (window.NeteaseBridge && NeteaseBridge.metaFromUrl &&
+          NeteaseBridge.isNeteaseUrl && NeteaseBridge.isNeteaseUrl(p)) {
+        var n = NeteaseBridge.metaFromUrl(p);
+        return (n && n.ts) || 0;
+      }
+      if (window.QQBridge && QQBridge.pathIssuedAt) return QQBridge.pathIssuedAt(p) || 0;
+    } catch (e) {}
+    return 0;
+  };
+
+  /* 这条直链还新鲜吗？回 {known, fresh, expiresAt}
+     known=false = 判不了（调用方应保守地解析一次）。 */
+  CM.pathFreshness = function(path) {
+    var p = String(path || '');
+    var unknown = { known: false, fresh: false, expiresAt: 0 };
+    if (!p || !CM.isUrlPath(p)) return unknown;
+    // ① 直链自己写了到期时间（B 站）
+    var m = /[?&]deadline=(\d{9,})/.exec(p);
+    if (m) {
+      var exp = parseInt(m[1], 10) * 1000;
+      return { known: true, fresh: Date.now() < exp - FRESH_MARGIN, expiresAt: exp };
+    }
+    // ② 平台回包里带了到期时间（QQ 的 vkey expiration，实测 ≈22 小时）
+    try {
+      if (window.QQBridge && typeof QQBridge.pathExpiresAt === 'function') {
+        var qexp = QQBridge.pathExpiresAt(p);
+        if (qexp) return { known: true, fresh: Date.now() < qexp - FRESH_MARGIN, expiresAt: qexp };
+      }
+    } catch (e) {}
+    /* ③ 平台声明"这条不能流播"：旧形态 http 明文的网易云 FLAC 直链在 foobar
+       里停滞在 ~0.5 秒（2026-10-24 实测定位；https 形态能流，见 netease-core.js
+       的 streamifyUrl / needStreamRefetch）。当作已过期触发重解析——老歌单里的
+       FLAC 行靠这条自动换成可流播的 https 直链。 */
+    try {
+      // 只对网易云直链生效：判定本身只看 .flac 后缀，不限域名的话任何来源的
+      // .flac 直链都会被永久判"已过期"，每次播放白跑一遍重解析
+      if (window.NeteaseBridge && typeof NeteaseBridge.isNeteaseUrl === 'function' &&
+          NeteaseBridge.isNeteaseUrl(p) &&
+          typeof NeteaseBridge.needStreamRefetch === 'function' &&
+          NeteaseBridge.needStreamRefetch(p)) {
+        return { known: true, fresh: false, expiresAt: 0, refetch: '非MP3' };
+      }
+    } catch (e) {}
+    // ④ 用签发时间 + 各平台的保守有效窗口
+    var issued = CM.onlineIssuedAt(p);
+    if (!issued) return unknown;
+    var win = FRESH_WINDOW.netease;
+    try {
+      if (window.QQBridge && QQBridge.mediaMidFromUrl && QQBridge.mediaMidFromUrl(p)) win = FRESH_WINDOW.qq;
+    } catch (e) {}
+    return { known: true, fresh: Date.now() < issued + win, expiresAt: issued + win };
+  };
+
+  /* 强制解析一条在线直链（带 2 分钟结果缓存 + 并发去重）。
+     回 {path, refreshed, error}：path 为空 = 确定拿不到可用音源，调用方必须提示，
+     **不能把死链交给宿主**。path 原样返回 = 本地文件 / 不是可刷新的在线源 /
+     认不出是哪一首（没有映射就没法重解析，原样播总比拒绝好）。 */
+  CM.refreshOnlinePath = function(path) {
+    var keep = function() { return { path: path }; };
+    if (!path || !CM.isUrlPath(path)) return Promise.resolve(keep());
+    var hit = _freshCache[path];
+    if (hit && Date.now() - hit.at < FRESH_CACHE_MS) {
+      return Promise.resolve({ path: hit.url, refreshed: hit.url !== path });
+    }
+    if (_freshPending[path]) return _freshPending[path];
+    var job = null;
+    try {
+      if (window.NeteaseBridge && NeteaseBridge.isNeteaseUrl(path) &&
+          typeof NeteaseBridge.refreshUrl === 'function') {
+        job = NeteaseBridge.refreshUrl(path);
+      } else if (window.QQBridge && typeof QQBridge.refreshUrl === 'function' &&
+                 QQBridge.mediaMidFromUrl && QQBridge.mediaMidFromUrl(path)) {
+        job = QQBridge.refreshUrl(path);
+      } else if (window.BilibiliBridge && typeof BilibiliBridge.refreshUrl === 'function' &&
+                 BilibiliBridge.isBiliUrl && BilibiliBridge.isBiliUrl(path)) {
+        job = BilibiliBridge.refreshUrl(path);
+      }
+    } catch (e) { job = null; }
+    if (!job || typeof job.then !== 'function') return Promise.resolve(keep());
+    var p = job.then(function(url) {
+      if (!url || typeof url !== 'string') {
+        return { path: '', error: '重新解析没有拿到可用直链（可能已下架）' };
+      }
+      _freshCache[path] = { url: url, at: Date.now() };
+      return { path: url, refreshed: url !== path };
+    }, function(e) {
+      if (e && e.cmUnidentifiable) return keep();
+      return { path: '', error: (e && e.message) || '重新解析直链失败' };
+    });
+    // 并发去重：按下鼠标的预取 + 双击的播放会同时要同一首，只发一份请求
+    _freshPending[path] = p;
+    p.then(function() { delete _freshPending[path]; }, function() { delete _freshPending[path]; });
+    return p;
+  };
+
+  /* 播放前入口：新鲜就直接给原样路径（零额外延迟），过期 / 判不了才解析一次。
+     opts.quiet = 不弹"正在重新解析"提示（预取用）。
+     回 {path, refreshed, cached, error}，形状与 refreshOnlinePath 兼容。 */
+  CM.ensureOnlinePath = function(path, opts) {
+    opts = opts || {};
+    if (!path || !CM.isUrlPath(path)) return Promise.resolve({ path: path });
+    var f = CM.pathFreshness(path);
+    if (f.known && f.fresh) return Promise.resolve({ path: path, refreshed: false, cached: true });
+    var timer = null;
+    if (!opts.quiet && typeof CM.showToast === 'function') {
+      // 解析要一个往返（B 站是两个）；超过 600ms 才提示，避免一闪而过
+      timer = setTimeout(function() {
+        CM.showToast('正在重新解析直链', '这条在线地址已过期，正在换一条新地址', null);
+      }, 600);
+    }
+    var clear = function() { if (timer) { clearTimeout(timer); timer = null; } };
+    return CM.refreshOnlinePath(path).then(function(r) {
+      clear();
+      return r;
+    }, function(e) {
+      clear();
+      throw e;
+    });
+  };
+
+  /* 预取：在线行鼠标按下就开始解析（双击的第二下之前就能拿到新地址），
+     已经新鲜的不请求；失败静默（真播时 ensureOnlinePath 会如实报错）。 */
+  CM.prefetchOnlinePath = function(path) {
+    if (!path || !CM.isUrlPath(path)) return;
+    if (typeof CM.pathFreshness === 'function') {
+      var f = CM.pathFreshness(path);
+      if (f.known && f.fresh) return;
+    }
+    CM.refreshOnlinePath(path).then(null, function() {});
+  };
 
   /* 立即播放一个路径（游离曲）：把它作为**不带歌单坐标**的队列项插到队首，再让宿主立刻播它 ——
      队列里已有的插队项原样保留。用 `insertNext({paths})` 而不是 `addPaths`：后者的路径会先写进
      宿主的 `[WebView Queue]` 影子歌单、成为一个**带坐标**的队列项 —— 带坐标的队列项被播放时
      宿主会把播放上下文带到那张歌单（详见 ui-playlist.js 的 enqueueTrack 注释），播完就不会
      回到原来的清单了；裸路径项则只是"插播这一项"。
-     不写任何用户歌单。 */
+     不写任何用户歌单。在线直链先按新鲜度决定要不要刷新（见 ensureOnlinePath）。 */
   CM.playNowPath = function(path) {
     if (!path) return Promise.resolve(false);
+    return CM.ensureOnlinePath(path).then(function(r) {
+      if (!r.path) {
+        CM.showToast('无法播放', r.error || '这首在线曲目的直链已失效', 'error');
+        return false;
+      }
+      return playPathNow(r.path);
+    });
+  };
+
+  // 已经刷新过的直链直接播（避免 playNowPath 再解析一次）
+  CM.playFreshPath = function(path) { return playPathNow(path); };
+
+  function playPathNow(path) {
     return CM.api('queue.insertNext', { paths: [path], position: 0 }).then(function(ar) {
       // 入队失败、或被宿主静默跳过（超 2048 字符的 URL 只计入 invalidCount）：队列里没有这一条，
       // 后面的播放调用会播到别的曲目上去 —— 直接走 playPath
@@ -237,6 +465,11 @@
     // 那次播放就不会进历史。
     _navPaths: Object.create(null),
     _navTtl: 30000,
+    /* 回溯目标的「歌名/歌手」。在线直链过期后播放会被换成一条新地址（见
+       playback-model.js 的 ensureOnlinePath），trackChanged 报的路径和 history 里
+       存的那条**不一样** —— 只按路径抑制会让这次回溯被当成新的播放事件：写一条
+       重复历史，还把 cursor 后面的"未来"截掉。路径对不上时用它认人。 */
+    _navWant: null,
     _purgeNav: function(now) {
       var t = (now || Date.now()) - this._navTtl;
       var map = this._navPaths;
@@ -269,7 +502,7 @@
       try { localStorage.setItem(HIST_KEY, JSON.stringify({ items: this.items, cursor: this.cursor })); } catch (e) {}
       if (state.queueOpen && CM.renderHistory) CM.renderHistory();
     },
-    clear: function() { this.items = []; this.cursor = -1; this._navPaths = Object.create(null); this.save(); },
+    clear: function() { this.items = []; this.cursor = -1; this._navPaths = Object.create(null); this._navWant = null; this.save(); },
     // 记录一次播放事件（app.js 的 playback:trackChanged 调用）
     note: function(track) {
       var path = CM.trackPath(track);
@@ -278,8 +511,20 @@
       if (this._navPaths[path]) {
         // 本次换曲来自历史回溯/点播：cursor 已就位，不再写入也不截断（未来保留）
         delete this._navPaths[path];
+        this._navWant = null;
         this.save();
         return;
+      }
+      // 路径对不上但确实是同一次回溯（在线直链被刷新成新地址）：按歌名/歌手认，
+      // 同样不写新事件、不截断未来
+      var want = this._navWant;
+      if (want && Date.now() - want.at < this._navTtl) {
+        var tName = CM.trackName(track) || '', tArtist = CM.trackArtist(track) || '';
+        if ((!want.title || tName === want.title) && (!want.artist || tArtist === want.artist)) {
+          this._navWant = null;
+          this.save();
+          return;
+        }
       }
       if (this.cursor < this.items.length - 1) this.items = this.items.slice(0, this.cursor + 1);
       var last = this.items[this.items.length - 1];
@@ -302,6 +547,7 @@
       if (!it) return false;
       this._purgeNav();
       this._navPaths[it.path] = Date.now();
+      this._navWant = { title: it.title || '', artist: it.artist || '', at: Date.now() };
       this.cursor = i;
       this.save();
       CM.playNowPath(it.path);

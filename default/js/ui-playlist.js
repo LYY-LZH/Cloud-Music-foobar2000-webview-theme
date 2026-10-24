@@ -94,7 +94,12 @@
       // 宿主 addPathsAsync 不会展开文件夹，会把它当单音轨加入导致"格式不支持"，
       // 这里复用 expandDroppedPaths 递归枚举文件夹内的音频文件后再添加。
       CM.expandDroppedPaths([r.folderPath]).then(function(paths) {
-        if (!paths.length) return;
+        if (!paths.length) {
+          // 以前这里是 `if (!paths.length) return;` —— 选完文件夹什么都不发生，
+          // 用户只能看到"扫描不到歌曲"。现在把宿主给的原因如实说出来。
+          CM.showToast('没有可添加的歌曲', CM.expandFailText('这个文件夹里没有音频文件'), 'error');
+          return;
+        }
         CM._addPaths(playlistIdx, paths, '正在添加 ' + paths.length + ' 个文件');
       });
     });
@@ -107,6 +112,189 @@
     CM.api('playlist.addPathsAsync', params).then(function(res) {
       if (res && res.success !== false) CM.showToast(okMsg, null, 'success');
       else CM.showToast('添加失败', res && res.error ? res.error : '路径可能无效', 'error');
+    });
+  };
+
+  /* ============================================
+   * 喜欢 → 「我喜欢的音乐」歌单
+   * ------------------------------------------------------------
+   * 「喜欢」按钮本职只是写评分（foo_playcount 5 星），但评分在界面里看不见 ——
+   * 用户点了心形，媒体库/侧栏毫无变化，反馈就是"点了喜欢无法加入喜欢歌单"。
+   * 这里评分照写，同时把路径追加进固定歌单（没有就建），取消喜欢时再移出。
+   * 移出会跳过"正在播放的那一首"：foobar2000 里删掉正在播的行会直接打断播放。
+   * ============================================ */
+  var LIKE_PLAYLIST = '我喜欢的音乐';
+
+  /* 读全部歌单。宿主明确失败时 reject —— 不能当成"没有这个歌单"：
+     那样 addToLikedPlaylist 会再建一张同名的，用户侧就出现两个「我喜欢的音乐」。 */
+  function allPlaylistRows() {
+    return CM.api('playlist.getAll').then(function(all) {
+      if (!all || all.success === false) {
+        throw new Error((all && (all.error || all.code)) || '读不到播放列表清单');
+      }
+      if (Array.isArray(all)) return all;
+      return all.playlists || all.items || [];
+    });
+  }
+
+  function findLikedIndex(rows) {
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i] && rows[i].name === LIKE_PLAYLIST && rows[i].index != null) return rows[i].index;
+    }
+    return -1;
+  }
+
+  /* 路径归一：页面里的路径和宿主 %path% 的值不是同一个字符串 ——
+     本地文件页面存 `file://E:\…mp3`，而查询引擎里的 %path% 是 `E:\…mp3`
+     （实测 `%path% IS "file://E:\…"` 恒 0 命中，坑过一轮）；在线曲目两边都是原样 URL。
+     比对一律走这里：去 file:// 前缀、斜杠统一、小写（Windows 路径不区分大小写）。 */
+  function normPath(p) {
+    var s = String(p || '').trim().replace(/^file:\/\/\/?/i, '');
+    try { s = decodeURIComponent(s); } catch (e) {}
+    return s.replace(/\//g, '\\').toLowerCase();
+  }
+
+  function sameTrackPath(a, b) { return !!a && !!b && normPath(a) === normPath(b); }
+
+  /* 预筛用的「文件名」：URL 先切掉 ?query#hash，再取最后一段。
+     实测 %path% HAS 是子串匹配（`%path% HAS 1567500666` 能命中整条 B 站直链），
+     所以拿文件名当粗筛，命中后再用 normPath 精确比对。别指望 IS ——
+     带 `?` 与 `&` 的长 URL 用 `IS` 实测 0 命中（窗口里看着像"歌单里没有"）。
+     文件名里带查询语法保留字符（`& | ! ( ) "`）时干脆不预筛：那些字符可能被
+     解析成运算符，回一个"成功但少几行"的结果会让去重判断静默失效。 */
+  function pathNeedle(p) {
+    var s = String(p || '').split(/[?#]/)[0];
+    var i = Math.max(s.lastIndexOf('/'), s.lastIndexOf('\\'));
+    if (i >= 0) s = s.slice(i + 1);
+    s = s.replace(/"/g, '').trim();
+    // % 也要挡：查询语法里 %name% 是字段引用，文件名里带 % 可能让粗筛静默失真
+    return /[&|!()%]/.test(s) ? '' : s;
+  }
+
+  // 在指定歌单里找出这个路径的所有行号。
+  // 先用宿主的查询引擎粗筛（一次调用、多长的歌单都一样快），拿回行号后只取这几行
+  // 做精确比对；查询不可用（老宿主 / 接口缺失 / 粗筛太泛）才退回分页扫描 —— 绝不用
+  // count:20000 那种一把梭（宿主会真的构造两万个行对象）。两条路都读不到时
+  // reject：不能拿"没扫到"当"不在歌单里"（否则会写入重复行 / 误报已移出）。
+  function findRowsByPath(idx, path) {
+    var needle = pathNeedle(path);
+    var MAX_PICK = 300;
+    function pick(tracks, rows) {
+      var hits = [];
+      for (var i = 0; i < tracks.length; i++) {
+        if (!sameTrackPath(CM.trackPath(tracks[i]), path)) continue;
+        hits.push(tracks[i].index != null ? tracks[i].index : (rows && rows[i] != null ? rows[i] : i));
+      }
+      return hits;
+    }
+    function viaQuery() {
+      if (!needle) return Promise.resolve(null);
+      return CM.api('playlist.getMatchingRows', { query: '%path% HAS "' + needle + '"', playlist: idx })
+        .then(function(r) {
+          if (!r || r.success === false || !Array.isArray(r.items)) return null;
+          if (!r.items.length) return [];
+          // 粗筛命中太多 = 这个名字不足以定位（同名文件成批），交回全量扫描
+          if (r.items.length > MAX_PICK) return null;
+          // 粗筛只回行号，取回行本身再精确比对（同一文件名可能有多首，别拿名字当身份）
+          var rows = r.items.slice();
+          return CM.api('playlist.getTracksAt', { playlist: idx, rows: rows }).then(function(g) {
+            if (!g || g.success === false) return null;
+            return pick((g.tracks || g.items) || [], rows);
+          }, function() { return null; });
+        }, function() { return null; });
+    }
+    return viaQuery().then(function(hits) {
+      if (hits) return hits;
+      return scanRowsByPath(idx, path);
+    });
+  }
+
+  function scanRowsByPath(idx, path) {
+    var hits = [];
+    var start = 0;
+    function step() {
+      return CM.api('playlist.getTracks', { playlist: idx, start: start, count: 500 }).then(function(r) {
+        if (!r || r.success === false) throw new Error('读不到歌单曲目列表');
+        var rows = (r.tracks || r.items) || [];
+        var total = r.total != null ? r.total : (start + rows.length);
+        for (var i = 0; i < rows.length; i++) {
+          if (sameTrackPath(CM.trackPath(rows[i]), path)) hits.push(rows[i].index != null ? rows[i].index : start + i);
+        }
+        start += rows.length;
+        if (rows.length && start < total) return step();
+        return hits;
+      });
+    }
+    return step();
+  }
+
+  CM.likedPlaylistIndex = function() {
+    return allPlaylistRows().then(function(rows) {
+      var idx = findLikedIndex(rows);
+      if (idx >= 0) return idx;
+      return CM.api('playlist.create', { name: LIKE_PLAYLIST }).then(function(r) {
+        if (!r || r.success === false) return -1;
+        var created = r.index != null ? r.index : r.playlist;
+        if (created != null && created >= 0) CM.loadPlaylists();
+        return created != null ? created : -1;
+      });
+    });
+  };
+
+  // 追加到「我喜欢的音乐」；已在歌单里就报 'exists'（不产生重复行）
+  CM.addToLikedPlaylist = function(path) {
+    if (!path) return Promise.resolve('skip');
+    return CM.likedPlaylistIndex().then(function(idx) {
+      if (idx == null || idx < 0) throw new Error('无法创建「' + LIKE_PLAYLIST + '」歌单');
+      return findRowsByPath(idx, path).then(function(rows) {
+        if (rows && rows.length) return 'exists';
+        return CM.api('playlist.addPathsSequential', { playlist: idx, paths: [path] }).then(function(res) {
+          if (!res || res.success === false) throw new Error((res && res.error) || '宿主拒绝写入歌单');
+          CM.loadPlaylists();
+          return 'added';
+        });
+      });
+    });
+  };
+
+  // 从「我喜欢的音乐」移出；'kept' = 这首正在播放（删行会打断播放，故保留）
+  CM.removeFromLikedPlaylist = function(path) {
+    if (!path) return Promise.resolve('skip');
+    // 正在播放的这一首暂不移出：foobar2000 删掉正在播的行会直接打断播放
+    if (sameTrackPath(CM.trackPath(CM.currentTrack), path)) return Promise.resolve('kept');
+    return allPlaylistRows().then(function(rows) {
+      var idx = findLikedIndex(rows);
+      if (idx < 0) return 'absent';
+      return findRowsByPath(idx, path).then(function(hits) {
+        if (!hits || !hits.length) return 'absent';
+        return CM.api('playlist.removeTracks', { playlist: idx, items: hits }).then(function(res) {
+          if (!res || res.success === false) throw new Error((res && res.error) || '宿主拒绝从歌单移除');
+          CM.loadPlaylists();
+          return 'removed';
+        });
+      });
+    });
+  };
+
+  /* 统一的「改评分」入口：评分落盘后同步「我喜欢的音乐」——
+     5 星 = 喜欢（追加进歌单），4 星及以下 / 清除评分 = 取消喜欢（移出）。
+     心形按钮与曲目右键的「评分 ▸」都走这一条，别再各写一遍：
+     之前只有心形接歌单，右键评 5 星却什么都不发生，用户会直接判定"功能没做"。
+     返回 {rating, liked}：liked ∈ added / exists / removed / absent / kept / error，
+     歌单那一步失败会带回 error（评分本身已经成功，调用方各自决定怎么提示）。 */
+  CM.setRating = function(path, stars) {
+    if (!path) return Promise.reject(new Error('这条曲目没有可用的路径'));
+    stars = Math.max(0, Math.min(5, parseInt(stars, 10) || 0));
+    return CM.api('rating.set', { path: path, rating: stars }).then(function(r) {
+      if (!r || r.success === false) {
+        // 宿主拒（组件缺失 / 在线曲目没进播放统计）时把自己的话放前面，再把宿主原文附上
+        var detail = (r && (r.error || r.message)) || '';
+        throw new Error('评分写入被拒绝（需要 foo_playcount 组件，在线曲目要先在播放统计里留有记录）' +
+                        (detail ? '：' + detail : ''));
+      }
+      var job = stars >= 5 ? CM.addToLikedPlaylist(path) : CM.removeFromLikedPlaylist(path);
+      return job.then(function(how) { return { rating: stars, liked: how }; },
+        function(e) { return { rating: stars, liked: 'error', error: e }; });
     });
   };
 
@@ -939,6 +1127,11 @@
           p = CM.api('queue.insertNext', { paths: [entry], position: cached });
         } else {
           p = CM.api('queue.getCount').then(function (r) {
+            // 查询失败时不能拿 respCount 的 0 当"空队列"——position 0 是队首，
+            // 那是"下一首播放"的语义；失败交到下面统一的错误提示里
+            if (!r || r.success === false) {
+              return { success: false, error: '拿不到插队队列长度，无法追加' };
+            }
             return CM.api('queue.insertNext', { paths: [entry], position: CM.respCount(r) });
           });
         }
@@ -989,33 +1182,45 @@
     ];
     // 评分收成一个二级菜单（与歌词右键的「小窗 / 歌词工具」同一种悬停展开方式）：
     // 5 个星级 + 清除评分共 6 行，平铺在主菜单里会把"编辑标签 / 从歌单删除"一直往下挤
+    // 评 5 星 = 喜欢（同时追加进「我喜欢的音乐」），评更低或清除 = 取消喜欢 ——
+    // 一律走 CM.setRating，与底栏心形按钮同一条路
     var ratingItems = [];
     for (var s = 5; s >= 1; s--) {
       (function(stars) {
         ratingItems.push({
           html: '<span class="ctx-stars">' + '★'.repeat(stars) + '<span style="opacity:0.25">' + '★'.repeat(5 - stars) + '</span></span>',
           action: function() {
-            CM.api('rating.set', { path: path, rating: stars }).then(function(r) {
-              if (r && r.success !== false) {
-                CM.showToast('已评分 ' + stars + ' 星', CM.trackName(track), 'success');
-                if (path === CM.trackPath(CM.currentTrack)) CM.refreshLikeState();
-              } else {
-                CM.showToast('评分失败', '需要安装 foo_playcount 组件', 'error');
+            CM.setRating(path, stars).then(function(res) {
+              if (path === CM.trackPath(CM.currentTrack)) CM.refreshLikeState();
+              if (res.liked === 'error') {
+                CM.showToast(stars >= 5 ? '已评分 5 星，但没能加入「我喜欢的音乐」' : '已评分 ' + stars + ' 星，但没能从「我喜欢的音乐」移出',
+                             (res.error && res.error.message) || null, 'error');
+                return;
               }
+              var note = stars >= 5
+                ? (res.liked === 'exists' ? '已经在「我喜欢的音乐」里' : '加入「我喜欢的音乐」')
+                : (res.liked === 'kept' ? '正在播放的这一首暂时留在歌单里，切歌后再评一次即可移出' : null);
+              CM.showToast('已评分 ' + stars + ' 星', note, 'success');
+            }, function(e) {
+              CM.showToast('评分失败', (e && e.message) || null, 'error');
             });
           }
         });
       })(s);
     }
     ratingItems.push({ label: '清除评分', action: function() {
-      CM.api('rating.set', { path: path, rating: 0 }).then(function(r) {
-        if (r && r.success !== false) {
-          CM.showToast('已清除评分', CM.trackName(track));
-          if (path === CM.trackPath(CM.currentTrack)) CM.refreshLikeState();
-        } else {
-          // 与上面的评分项一致：失败要说出来，不能静默
-          CM.showToast('清除失败', '评分功能需要 foo_playcount 组件', 'error');
+      CM.setRating(path, 0).then(function(res) {
+        if (path === CM.trackPath(CM.currentTrack)) CM.refreshLikeState();
+        // 评分已清但移出歌单失败（liked:'error'）要说出来，别报"已清除"了事
+        if (res && res.liked === 'error') {
+          CM.showToast('已清除评分，但没能从「我喜欢的音乐」移出',
+                       (res.error && res.error.message) || null, 'error');
+          return;
         }
+        CM.showToast('已清除评分', CM.trackName(track));
+      }, function(e) {
+        // 与上面的评分项一致：失败要说出来，不能静默
+        CM.showToast('清除失败', (e && e.message) || null, 'error');
       });
     } });
     items.push({ label: '评分', icon: CM.icons.star, submenu: ratingItems });

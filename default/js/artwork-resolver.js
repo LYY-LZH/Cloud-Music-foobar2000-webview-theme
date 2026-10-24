@@ -274,6 +274,9 @@
         NeteaseBridge.isNeteaseUrl(p)) return 'netease';
     if (window.QQBridge && typeof QQBridge.mediaMidFromUrl === 'function' &&
         QQBridge.mediaMidFromUrl(p)) return 'qq';
+    // B 站：域名白名单判断（hdslb 封面 / 图片不算音源，见 bilibili-core.js 的 isBiliUrl）
+    if (window.BilibiliBridge && typeof BilibiliBridge.isBiliUrl === 'function' &&
+        BilibiliBridge.isBiliUrl(p)) return 'bili';
     return '';
   }
 
@@ -281,10 +284,11 @@
     var prov = onlineProviderOf(trackPath);
     if (!prov) return Promise.resolve('');
     lastStatus.asked++;
-    return (prov === 'netease'
-      ? NeteaseBridge.coverDataUrlForTrack(trackPath)
-      : QQBridge.coverDataUrl(QQBridge.mediaMidFromUrl(trackPath))
-    ).then(function (url) {
+    var job;
+    if (prov === 'netease') job = NeteaseBridge.coverDataUrlForTrack(trackPath);
+    else if (prov === 'bili') job = BilibiliBridge.coverDataUrlForTrack(trackPath);
+    else job = QQBridge.coverDataUrl(QQBridge.mediaMidFromUrl(trackPath));
+    return job.then(function (url) {
       if (!url) {
         lastStatus.misses++; lastStatus.state = 'miss';
         return '';

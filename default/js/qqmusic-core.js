@@ -244,9 +244,14 @@
     '320': ['320', 'aac96', '128'],
     aac96: ['aac96', '128'],
     '128': ['128'],
-    /* 流播专用：纯 MP3 链。QQ CDN 给所有直链打 audio/x-ogg 类型，
-       foobar 按类型选解码器会把 FLAC/AAC 流误当 Ogg 拒解（MP3 靠帧嗅探
-       不受影响），所以在线播放固定走 MP3；无损请用下载落盘。 */
+    /* 流播专用：纯 MP3 链。
+       **2026-10-23 实测**：M500(128K) 直链在 `aqqmusic.tc.qq.com` / `sjy6` /
+       `ws` / `dl` / `isure` 五个主机上**全部**回 `Content-Type: audio/mpeg`、
+       字节是 ID3 —— 以前"QQ CDN 一律打 audio/x-ogg"的说法至少对 mp3 不成立。
+       320K(M800) 与无损(F000 / RS01 / AI00)：未登录时一律 `104003` / `101404`，
+       连直链都拿不到，所以**它们的类型尚未实测**（要量必须有登录 Cookie）。
+       在量到之前，播放固定走 MP3（320 → 128）—— 无论 CDN 怎么标都能播；
+       无损仍请用下载落盘。 */
     mp3: ['320', '128']
   };
   /* 接口 sip 之外的兜底主机 */
@@ -310,13 +315,23 @@
     try { localStorage.setItem(LS_MEDIA_COVER, JSON.stringify(map)); } catch (e) {}
   }
 
-  /* mediaMid → {title, artist, album}
+  /* mediaMid → {title, artist, album, songmid, interval, ts, expiresAt}
      ------------------------------------------------------------
      直链本身不带任何标签：放到 foobar 里播放时，主题只能从 URL 尾巴猜名字，
      而 CDN 的签名参数里带 `/`，猜出来就是一段签名碎片（实测界面标题会变成
      "GsvWzqeUwhOhb+2GUTYfbcNo=" 这种）。所以播放 / 下载时把搜索结果里的
      歌名歌手一起记下来，由 core.js 的 CM.onlineName 取名时优先查。
-     与封面映射同样持久化，上限 400 条。 */
+     与封面映射同样持久化，上限 400 条。
+
+     **songmid 必须一起记**：播放前重解析直链时，vkey 接口要求 songmid 与
+     filename 一一配对。实测同一首歌（免费曲目）同一个 filename：
+       songmid=001LcPEv1TEenh → purl 210 字符
+       songmid=''            → purl 空串（result 仍是 0，不报错）
+     所以"只有 mediaMid 也能刷直链"是不成立的 —— 早前 refreshUrl 传 ''，
+     每次重播都必然失败，还报成「可能需要 VIP / 版权受限」。
+     · ts        = 这次解析出直链的时刻（判新鲜度用）
+     · expiresAt = 回包里的 expiration（秒）换算的绝对到期时间（实测 ≈22 小时）
+     · interval  = 时长（秒），重搜兜底时用来区分同名原曲 / 伴奏 */
   var LS_NAMES = 'cm.qqmusic.names';
   var _names = null;
 
@@ -327,21 +342,65 @@
     return _names;
   }
 
-  function rememberNames(tracks) {
-    (tracks || []).forEach(function (t) {
-      if (t && t.mediaMid && t.title) {
-        namesMap()[t.mediaMid] = { title: t.title, artist: t.artist || '',
-                                   album: t.album || '', ts: Date.now() };
+  /* 合并写入（一批只落一次盘）。touch=true 表示"这是刚解析出的直链"：
+     刷新 ts / expiresAt；false 只补字段（搜索时记歌名）。 */
+  function storeNames(entries) {
+    var map = namesMap(), changed = false;
+    (entries || []).forEach(function (en) {
+      var mid = en && en.mid;
+      if (!mid) return;
+      var meta = en.meta || {};
+      var prev = map[mid] || {};
+      var rec = {
+        title: meta.title || prev.title || '',
+        artist: meta.artist || prev.artist || '',
+        album: meta.album || prev.album || '',
+        songmid: meta.songmid || prev.songmid || '',
+        interval: meta.interval || prev.interval || 0,
+        ts: prev.ts || 0,
+        expiresAt: prev.expiresAt || 0
+      };
+      if (en.touch) {
+        rec.ts = Date.now();
+        if (meta.expiresAt) rec.expiresAt = meta.expiresAt;
       }
+      if (!rec.ts) rec.ts = Date.now();      // 只有歌名、没解析过：ts 记"首次见到"
+      if (!rec.title && !rec.songmid) return; // 什么都不知道就不写
+      map[mid] = rec;
+      changed = true;
     });
-    var map = _names;
-    if (!map) return;
+    if (!changed) return;
     var keys = Object.keys(map);
     if (keys.length > MEDIA_COVER_MAX) {
       keys.sort(function (a, b) { return ((map[a] && map[a].ts) || 0) - ((map[b] && map[b].ts) || 0); });
       for (var i = 0; i < keys.length - MEDIA_COVER_MAX; i++) delete map[keys[i]];
     }
     try { lsSet(LS_NAMES, JSON.stringify(map)); } catch (e) {}
+  }
+
+  function rememberNames(tracks) {
+    storeNames((tracks || []).map(function (t) {
+      return { mid: t && t.mediaMid, meta: t ? {
+        title: t.title, artist: t.artist || t.singer || '', album: t.album,
+        songmid: t.songmid, interval: t.interval
+      } : {} };
+    }));
+  }
+
+  /* 这条直链是什么时候签发的（播放前判断"还要不要重新解析"用）。
+     直链本身不带到期时间，借解析时记下的 ts。 */
+  function pathIssuedAt(u) {
+    var mid = mediaMidFromUrl(u);
+    var n = mid && namesMap()[mid];
+    return (n && n.ts) || 0;
+  }
+
+  /* 这条直链什么时候到期（QQ 的 vkey 回包带 expiration，秒）。
+     有它就精确判新鲜度，没有就交回调用方的保守窗口。 */
+  function pathExpiresAt(u) {
+    var mid = mediaMidFromUrl(u);
+    var n = mid && namesMap()[mid];
+    return (n && n.expiresAt) || 0;
   }
 
   /* 直链 → 歌名/歌手（注册给主题的 CM.onlineName） */
@@ -599,7 +658,92 @@
         throw new Error('接口未返回任何音源数据（检查网络或接口变动）');
       }
       var hosts = (Array.isArray(d.sip) && d.sip.length ? d.sip : SIPS).filter(Boolean);
-      return { infos: d.midurlinfo, hosts: hosts, chain: chain };
+      // expiration 是秒（实测 80400 ≈ 22 小时），给判新鲜度用
+      return { infos: d.midurlinfo, hosts: hosts, chain: chain,
+               expiration: Number(d.expiration) || 0 };
+    });
+  }
+
+  /* 播放前刷新直链：旧 vkey 过期后 foobar 打不开就自动跳下一首（"还没开始就跳歌"）。
+     直链文件名里带 mediaMid，但**光有 mediaMid 不够**：vkey 接口要求 songmid 与
+     filename 配对，songmid 传空时 purl 恒为空串（实测，见文件头 namesMap 注释）。
+     所以刷新一律优先用解析时记下的 songmid；老记录（这次修复之前写下的映射没有
+     songmid）按歌名 / 歌手 / 时长重搜一次把 songmid 找回来 —— 同名伴奏与原曲的
+     mediaMid 不同，能用 mediaMid 命中就直接锁定。 */
+  function refreshUrl(u) {
+    var mid = mediaMidFromUrl(u);
+    if (!mid) {
+      // 认不出 mediaMid：没法重新解析，交给调用方原样播（不能因为刷新不了就拒绝）
+      var e0 = new Error('这条直链里没有 mediaMid');
+      e0.cmUnidentifiable = true;
+      return Promise.reject(e0);
+    }
+    // 播放路径固定 MP3 档（与 playTracks 的 resolveMany(tracks,'mp3') 同一口径）：
+    // getQuality() 是下载档，跟随它会把登录态解析出的 FLAC/母带直链交给宿主流播
+    var quality = 'mp3';
+    var rec = namesMap()[mid] || {};
+
+    /* 解析成功：记下 songmid 与新直链的签发 / 到期时间（下次判新鲜度用） */
+    function accept(r, song) {
+      if (!r || !r.url) throw new Error('重新解析拿不到直链');
+      // 落库要用**实际解析用的** mediaMid（重搜兜底可能换 mid）：记到旧 mid 名下
+      // 的话新直链查不到映射 —— 新鲜度判定失效、下次刷新误报"缺映射"、歌名退回签名碎片
+      storeNames([{ mid: (r.mediaMid || mid), touch: true, meta: {
+        title: rec.title || (song && song.title) || '',
+        artist: rec.artist || (song && song.artist) || '',
+        album: rec.album || (song && song.album) || '',
+        songmid: r.songmid || (song && song.songmid) || '',
+        interval: rec.interval || (song && song.interval) || 0,
+        expiresAt: r.expiresAt || 0
+      } }]);
+      return r.url;
+    }
+
+    if (rec.songmid) {
+      return resolveStream(rec.songmid, quality, mid).then(function (r) { return accept(r); });
+    }
+
+    if (rec.title) {
+      return refindSong(rec, mid).then(function (song) {
+        return resolveStream(song.songmid, quality, song.mediaMid || mid)
+          .then(function (r) { return accept(r, song); });
+      });
+    }
+
+    // 什么都不知道（映射被裁掉 / 手工贴的直链）：只能按 mediaMid 试一次，
+    // 大概率拿不到 —— 交给调用方如实报错，别假装能播
+    return resolveStream('', quality, mid).then(function (r) { return accept(r); },
+      function (e) {
+        throw new Error('缺少这首歌的映射（songmid），重新搜索后再播一次即可刷新' +
+                        '（原报错：' + ((e && e.message) || '解析失败') + '）');
+      });
+  }
+
+  /* 老记录缺 songmid 时的兜底：按「歌手 + 歌名」重搜，挑回同一首。
+     优先级：mediaMid 完全一致 > 同名同歌手且时长差 ≤2 秒（伴奏与原曲常常同名，
+     只能靠时长）> 同名同歌手且只有一首。挑不唯一就失败 —— 宁可报错也不要
+     把伴奏当成原曲播出去。 */
+  function refindSong(rec, mid) {
+    var kw = ((rec.artist ? rec.artist + ' ' : '') + (rec.title || '')).trim();
+    if (!kw) return Promise.reject(new Error('没有可用于重搜的歌名'));
+    return search(kw, 1, 20).then(function (r) {
+      var songs = (r && r.songs) || [];
+      var exactMid = null, byDur = null, sameName = [];
+      songs.forEach(function (s) {
+        if (!s || !s.songmid) return;
+        if (s.mediaMid && s.mediaMid === mid) { exactMid = s; return; }
+        if (s.title !== rec.title) return;
+        if (rec.artist && (s.artist || '') !== rec.artist) return;
+        sameName.push(s);
+        if (rec.interval && Math.abs((s.interval || 0) - rec.interval) <= 2) {
+          if (!byDur || Math.abs((s.interval || 0) - rec.interval) <
+                       Math.abs((byDur.interval || 0) - rec.interval)) byDur = s;
+        }
+      });
+      if (exactMid) return exactMid;
+      if (byDur) return byDur;
+      if (sameName.length === 1) return sameName[0];
+      throw new Error(sameName.length ? '同名曲目有多首，无法确定是哪一首' : '重搜没有找到同名同歌手的曲目');
     });
   }
 
@@ -632,7 +776,8 @@
             return probe(urls[k]).then(function (ok) {
               if (ok) {
                 return { ok: true, url: urls[k], quality: r.chain[i],
-                         mediaMid: mid, songmid: songmid };
+                         mediaMid: mid, songmid: songmid,
+                         expiresAt: r.expiration ? Date.now() + r.expiration * 1000 : 0 };
               }
               return tryHost(k + 1);
             });
@@ -720,6 +865,18 @@
       // 解析完就把「直链 → 歌名/歌手」记下来（不等调用方记得调 rememberMediaCovers）：
       // 在线曲目在 foobar 里没有标签，主题取名只能靠这张表
       rememberNames(tracks);
+      /* 再补一条"解析结果"：这批才有 mediaMid（搜索结果不带 file.media_mid 时
+         是靠 songDetail 补的）与 **songmid**。songmid 是重播时重解析直链的钥匙，
+         少了它 vkey 只会回空 purl（见 namesMap 注释），重播就会报"找不到"。 */
+      storeNames(results.map(function (r) {
+        if (!r || !r.ok || !r.r) return null;
+        var t = r.t || {};
+        return { mid: r.r.mediaMid, touch: true, meta: {
+          songmid: r.r.songmid || t.songmid || '',
+          expiresAt: r.r.expiresAt || 0,
+          title: t.title, artist: t.artist, album: t.album, interval: t.interval
+        } };
+      }).filter(Boolean));
       var urls = [], resolves = [], skipped = [], qCount = {};
       for (var i = 0; i < results.length; i++) {
         var r = results[i] || { ok: false, e: new Error('解析中断'), t: tracks[i] || {} };
@@ -1190,6 +1347,7 @@
     getCookie: getCookie, setCookie: setCookie, clearCookie: clearCookie,
     search: search,
     resolveStream: resolveStream,
+    refreshUrl: refreshUrl,
     resolveMany: resolveMany,
     lyric: lyric, lyricCacheClear: lyricCacheClear,
     /* 按 songmid 精确取词：候选列表点选时用（已知 mid 就别再靠"标题+歌手"模糊匹配） */
@@ -1200,6 +1358,8 @@
     rememberMediaCovers: rememberMediaCovers,
     mediaCover: mediaCover,
     mediaMidFromUrl: mediaMidFromUrl,
+    pathIssuedAt: pathIssuedAt,
+    pathExpiresAt: pathExpiresAt,
     /* 直链 → 歌名/歌手（主题取名用；也方便在控制台里核对映射有没有记上） */
     onlineName: onlineName,
     /* 繁→简对照表对外公开：网易云桥接（netease-core.js）拿它归一化曲名，

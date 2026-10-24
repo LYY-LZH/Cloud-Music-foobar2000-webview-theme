@@ -51,7 +51,7 @@
       });
       var _switchTabNav = CM.switchTab;
       CM.switchTab = function(tab) {
-        if (tab === 'qqmusic' || tab === 'netease') setOnlineGroup(true, false);
+        if (tab === 'qqmusic' || tab === 'netease' || tab === 'bilibili') setOnlineGroup(true, false);
         _switchTabNav.apply(this, arguments);
       };
     }
@@ -86,9 +86,10 @@
     els.addPlaylistBtn.addEventListener('click', function() {
       CM.showModal({ title: '新建歌单', input: '', okText: '创建' }).then(function(name) {
         if (!name) return;
-        CM.api('playlist.create', { name: name }).then(function(r) {
-          if (r && r.success !== false) CM.showToast('已创建歌单', name, 'success');
-        });
+        // 写操作走 apiOr：重名 / 被拒时用户得知道为什么，不能只是"点了没反应"
+        CM.apiOr('playlist.create', { name: name }).then(function() {
+          CM.showToast('已创建歌单', name, 'success');
+        }, function(e) { CM.failToast(e, '无法创建歌单'); });
       });
     });
   };
@@ -158,9 +159,7 @@
             { playlist: idx, pattern: '%artist% | %album% | %tracknumber%' });
         } });
         items.push({ label: '反转列表', icon: CM.icons.reverse, action: function() {
-          CM.api('playlist.reverse', { playlist: idx }).then(function(r) {
-            if (r && r.success !== false) CM.showToast('已反转列表顺序', null, 'success');
-          });
+          plWrite('无法反转列表', '已反转列表顺序', 'playlist.reverse', { playlist: idx });
         } });
         items.push({ divider: true });
         items.push({ label: '撤销上一步', action: function() {
@@ -306,19 +305,32 @@
       });
     });
 
-    // 喜欢 = 评分 5 星 / 清除
+    // 喜欢 = 评分 5 星 + 追加进「我喜欢的音乐」歌单（只写评分的旧做法在界面上看不见）
+    // 走 CM.setRating：曲目右键的「评分 ▸」也是同一条路，5 星都进歌单
     els.likeBtn.addEventListener('click', function() {
       var path = CM.trackPath(CM.currentTrack);
       if (!path) return;
       var liked = els.likeBtn.classList.contains('liked');
-      var target = liked ? 0 : 5;
-      CM.api('rating.set', { path: path, rating: target }).then(function(r) {
-        if (r && r.success !== false) {
-          els.likeBtn.classList.toggle('liked', !liked);
-          CM.showToast(liked ? '已取消喜欢' : '已添加到喜欢', CM.trackName(CM.currentTrack), liked ? null : 'success');
+      var name = CM.trackName(CM.currentTrack);
+      CM.setRating(path, liked ? 0 : 5).then(function(res) {
+        els.likeBtn.classList.toggle('liked', res.rating >= 5);
+        if (liked) {
+          if (res.liked === 'error') {
+            // 评分已经清了，但歌单里那行没删掉：如实说，别让用户以为已经移出
+            CM.showToast('已清除评分，但没能从「我喜欢的音乐」移出', (res.error && res.error.message) || null, 'error');
+            return;
+          }
+          CM.showToast('已取消喜欢',
+                       res.liked === 'kept' ? '正在播放的这一首暂时留在歌单里，切歌后再取消一次即可移除' : null);
+        } else if (res.liked === 'error') {
+          // 评分已经写成功：歌单没跟上要单独说清楚，否则用户以为"点了喜欢没反应"
+          CM.showToast('已评分，但没能加入「我喜欢的音乐」', (res.error && res.error.message) || null, 'error');
         } else {
-          CM.showToast('操作失败', '评分功能需要 foo_playcount 组件', 'error');
+          CM.showToast(res.liked === 'exists' ? '已在「我喜欢的音乐」里' : '已添加到「我喜欢的音乐」', name,
+                       res.liked === 'exists' ? null : 'success');
         }
+      }, function(e) {
+        CM.showToast('没能标记喜欢', (e && e.message) || null, 'error');
       });
     });
 
@@ -703,8 +715,6 @@
       '</div>' +
       '<div class="popover-label">前置增益 <span class="rg-val" id="rgPreampVal">--</span></div>' +
       '<input type="range" class="rg-slider" id="rgPreamp" min="-12" max="12" step="0.5" value="0" />' +
-      // 扫描增益：replaygain.scan 走宿主右键菜单管线（track = 逐文件扫描）
-      '<div class="rg-seg" id="rgScanRow"><button id="rgScan">扫描当前曲目增益</button></div>' +
       '</div>';
     CM.$('rgSource').addEventListener('click', function(e) {
       var b = e.target.closest('button'); if (!b) return;
@@ -796,40 +806,84 @@
    * 拖放（宿主 dnd API，回退 HTML5 提示）
    * ============================================ */
   var AUDIO_EXT = /\.(mp3|flac|wav|aac|m4a|mp4|opus|ogg|oga|wma|ape|wv|alac|aiff|aif|dsf|dff|tak|tta|mpc|mka|m4b|m4r)$/i;
+  // 目录 + 文件名拼完整路径（file.list 非递归回包只有名字）
+  function joinDirName(dir, name) {
+    if (/[\\/]$/.test(dir)) return dir + name;
+    return dir + (dir.indexOf('\\') >= 0 ? '\\' : '/') + name;
+  }
 
-  // 把拖入的路径展开成可播放的音频文件：
-  // 目录用 utils.ListFiles 递归枚举其下音频文件，普通文件保留（仅音频）。宿主 addPathsAsync
-  // 不会展开文件夹，会把文件夹当一个音轨直接加入导致"无法打开（文件格式不支持）"。
+  // 把拖入 / 选中的路径展开成可播放的音频文件：
+  // 目录用宿主 file.list 递归枚举，普通文件按扩展名保留。宿主 addPathsAsync 不会展开
+  // 文件夹，会把文件夹当一个音轨加入导致"无法打开（文件格式不支持）"。
+  // 插件 2.0.0 只加载 bridge.global.js，旧 SMP 兼容层的 window.utils（IsDirectory /
+  // ListFiles）默认**不存在** —— 早先那条分支永远走不到，选文件夹后静默返回空数组，
+  // 表现就是"添加文件夹扫描不到里面的歌曲"。这里改用宿主 file.exists + file.list，
+  // 读不到就把原因记进 CM._expandFailures，由调用方如实提示，不再静默丢。
   CM.expandDroppedPaths = function(raw) {
     var rawPaths = (raw || []).map(function(f) {
       return typeof f === 'string' ? f : (f.path || f.name || '');
     }).filter(Boolean);
+    var failures = [];
     var jobs = rawPaths.map(function(p) {
       return Promise.resolve().then(function() {
-        if (!window.utils || !window.utils.IsDirectory || !window.utils.ListFiles) return AUDIO_EXT.test(p) ? [p] : [];
-        return window.utils.IsDirectory(p).then(function(isDir) {
-          if (!isDir) return AUDIO_EXT.test(p) ? [p] : [];
-          return window.utils.ListFiles(p, true).then(function(files) {
-            return (files || []).filter(function(f) { return AUDIO_EXT.test(f); });
+        if (CM.isUrlPath && CM.isUrlPath(p)) return [p];      // 网络地址原样交给歌单
+        return CM.api('file.exists', { path: p }).then(function(ex) {
+          if (!ex || ex.success === false) {
+            // 宿主没有 file.* 接口：至少别把普通音频文件丢掉，同时把原因报上去
+            failures.push(p + '（宿主未提供 file.exists）');
+            return AUDIO_EXT.test(p) ? [p] : [];
+          }
+          if (ex.isDirectory !== true) return AUDIO_EXT.test(p) ? [p] : [];
+          return CM.api('file.list', { path: p, recursive: true }).then(function(ls) {
+            if (!ls || ls.success === false) {
+              failures.push(p + '（' + ((ls && (ls.error || ls.code)) || '目录读取失败') + '）');
+              return [];
+            }
+            var files = ls.files || ls.items || [];
+            var out = [];
+            for (var i = 0; i < files.length; i++) {
+              var f = files[i];
+              var name = typeof f === 'string' ? f : (f.path || f.name || '');
+              if (!name) continue;
+              // 递归回包是完整路径；万一只回了文件名，补回目录前缀
+              if (name.indexOf('\\') < 0 && name.indexOf('/') < 0) name = joinDirName(p, name);
+              if (AUDIO_EXT.test(name)) out.push(name);
+            }
+            return out;
           });
         });
-      }).catch(function() { return AUDIO_EXT.test(p) ? [p] : []; });
+      }).catch(function(e) {
+        failures.push(p + '（' + ((e && e.message) || '读取失败') + '）');
+        return [];
+      });
     });
     return Promise.all(jobs).then(function(groups) {
+      CM._expandFailures = failures;
       return Array.prototype.concat.apply([], groups);
     });
+  };
+
+  // 展开失败 / 没找到音频时的一句实话（调用方在拿到空列表时用）
+  CM.expandFailText = function(fallback) {
+    var f = CM._expandFailures || [];
+    return f.length ? f.join('；') : (fallback || '没有找到可添加的音频文件');
   };
 
   // 统一入口：把拖进来的（文件/文件夹）路径加到当前歌单
   CM.addDroppedPaths = function(raw) {
     CM.expandDroppedPaths(raw).then(function(paths) {
-      if (!paths.length) return;
+      if (!paths.length) {
+        CM.showToast('没有可添加的歌曲', CM.expandFailText('文件夹里没有音频文件'), 'error');
+        return;
+      }
       var target = state.currentPlaylistIndex >= 0 ? state.currentPlaylistIndex : undefined;
       var params = { paths: paths };
       if (target !== undefined) params.playlist = target;
       CM.api('playlist.addPathsAsync', params).then(function(res) {
         if (res && res.success !== false) {
           CM.showToast('正在添加 ' + paths.length + ' 个项目', null, 'success');
+        } else {
+          CM.showToast('添加失败', (res && res.error) || '路径可能无效', 'error');
         }
       });
     });
@@ -959,6 +1013,13 @@
           // 标签编辑器 → 批量选择）。原先一次全关，会让 Esc 在标签编辑器
           // 上顺带清掉派生它的批量多选；队列拖拽的取消在 ui-queue 的
           // 捕获监听里处理（stopPropagation），到不了这里
+          if (!els.ctxMenu.classList.contains('hidden')) { CM.hideCtxMenu(); break; }
+          var escTeo = CM.$('tagEditorOverlay');
+          if (escTeo && escTeo.classList.contains('open')) { CM.hideTagEditor(); break; }
+          // 沉浸页盖在底栏/抽屉之上（z-index 200）：它开着时 Esc 只关沉浸页
+          //（bindNpOverlay 的独立监听负责关），垫在底下的队列抽屉/批量选择留给
+          // 下一次 —— 原先两个 document 级监听互不通气，一次 Esc 会连关两层
+          if (state.npOpen) break;
           if (state.queueOpen) { CM.toggleQueue(false); break; }
           if (els.morePopover.classList.contains('open') ||
               (els.rgPopover && els.rgPopover.classList.contains('open'))) {
@@ -966,9 +1027,6 @@
             if (els.rgPopover) els.rgPopover.classList.remove('open');
             break;
           }
-          if (!els.ctxMenu.classList.contains('hidden')) { CM.hideCtxMenu(); break; }
-          var escTeo = CM.$('tagEditorOverlay');
-          if (escTeo && escTeo.classList.contains('open')) { CM.hideTagEditor(); break; }
           // 清除批量选择
           if (state.batchSelected.size > 0) CM.clearBatchSelection();
           break;
@@ -983,10 +1041,20 @@
    * 仅保留 taskbar.setProgress 进度条（调用即下发、无后台依赖）。
    * ============================================ */
   CM.initTaskbar = function() {
-    // 探测任务栏 API 可用性（进度条依赖）；不可用时静默跳过
-    CM.api('taskbar.setProgress', { state: 'none' }).then(function(r) {
-      CM.taskbarAvailable = !!(r && r.success);
-    });
+    // 任务栏按钮要等宿主窗口真正显示后才存在，boot 早期的下发会 OPERATION_FAILED ——
+    // 而且一次性探测失败会把 taskbarAvailable 永久钉在 false，进度条功能整个失效。
+    // 改成失败退避重试（最多 10 次）；探测走裸 fb.invoke，预期中的前几次失败不刷控制台。
+    var tries = 0;
+    function probe() {
+      tries++;
+      fb.invoke('taskbar.setProgress', { state: 'none' }).then(function (r) {
+        if (r && r.success !== false) { CM.taskbarAvailable = true; return; }
+        if (tries < 10) setTimeout(probe, Math.min(1000 * tries, 5000));
+      }, function () {
+        if (tries < 10) setTimeout(probe, Math.min(1000 * tries, 5000));
+      });
+    }
+    probe();
   };
 
   // 节流：仅当可见进度 1% 变化时才通过 IPC 更新任务栏，避免 timeHighRes 高频事件（~30次/秒）反复调用宿主 API
@@ -1142,14 +1210,18 @@
 
   CM.syncEQState = function() {
     CM.api('dsp.getChain').then(function(r) {
-      eqMode = findEQInChain(r && r.dsps) >= 0;
+      // 失败信封是真值：不判 success 会把"没问到"当成"链里没有"，备注显示"关"
+      if (!r || r.success === false) return;
+      eqMode = findEQInChain(r.dsps) >= 0;
       updateEQUI();
     });
   };
 
   CM.toggleEQ = function() {
     CM.api('dsp.getChain').then(function(r) {
-      if (!r) { CM.showToast('操作失败', '无法获取 DSP 链', 'error'); return; }
+      // 失败信封是真值：不判 success 会把读链失败当"链里没有 EQ"，
+      // 接着 addDsp 给已在链中的均衡器再添一份
+      if (!r || r.success === false) { CM.showToast('操作失败', '无法获取 DSP 链', 'error'); return; }
       var eqIndex = findEQInChain(r.dsps);
       if (eqIndex >= 0) {
         CM.api('dsp.removeDsp', { index: eqIndex }).then(function(res) {
@@ -1568,7 +1640,9 @@
         divider.className = 'ctx-divider';
         var item = document.createElement('div');
         item.className = 'ctx-item';
-        item.dataset.idx = menu.children.length;
+        // 自己带 click 监听；idx 给一个永远越界的 -1，防止 ctx 菜单的委托处理器
+        //（按 _ctxMenuItems[dataset.idx] 取 action）将来因条目数变化误触别的命令
+        item.dataset.idx = '-1';
         item.innerHTML = (CM.icons.tag || '') + '<span>批量编辑标签（' + state.batchSelected.size + '首）</span>';
         item.addEventListener('click', function() {
           CM.hideCtxMenu();

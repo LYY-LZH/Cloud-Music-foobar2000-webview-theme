@@ -174,7 +174,7 @@
   <h1>CloudMusic 主题功能指南</h1>
   <p>一份覆盖全部功能的操作手册 — 从基础播放到标签编辑，帮助你充分利用 CloudMusic 主题的每一项能力。</p>
   <div class="hero-meta">
-    <div class="hero-meta-item">版本 <b>v3.0.0</b></div>
+    <div class="hero-meta-item">版本 <b>v3.0.1</b></div>
     <div class="hero-meta-item">作者 <b>灵芝含</b></div>
     <div class="hero-meta-item">SDK <b>foo_ui_webview2 2.0.0</b></div>
   </div>
@@ -207,6 +207,7 @@
     <a href="#s20"><span class="num">20</span>更多菜单</a>
     <a href="#s21"><span class="num">21</span>QQ 音乐在线音源</a>
     <a href="#s22"><span class="num">22</span>网易云音乐在线音源</a>
+    <a href="#s23"><span class="num">23</span>Bilibili 在线音源</a>
   </div>
 </div>
 
@@ -220,19 +221,33 @@
       <svg viewBox="0 0 24 24"><path d="M3 3v4h2V5h2V3Z"/><path d="M7 3h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H3v-2"/><path d="M3 9v8"/><path d="M13 8h4"/><path d="M13 12h4"/><path d="M13 16h2"/><path d="M6 17l2 2 3-4"/></svg>
     </div>
     <div>
-      <div class="section-title">更新日志 · v3.0.0</div>
-      <div class="section-desc">首个对外版本（适配 foo_ui_webview2 2.0.0）—— 这里只列要点</div>
+      <div class="section-title">更新日志 · v3.0.1</div>
+      <div class="section-desc">在线直链时效 · 媒体库加载方式 · Bilibili 页（新增 / 封面 / 下载）—— 这里只列要点</div>
     </div>
   </div>
   <div class="section-body">
-    <strong>这一版做了什么</strong>
+    <strong>v3.0.1 做了什么</strong>
+    <ul>
+      <li><strong>「一首歌还没开始就自动跳到别的歌」修好了</strong>：根因是歌单 / 播放历史里存的是带签名时效的直链 —— 过期后宿主打不开就自动下一首，而点过去的那首同样过期，于是继续跳。现在播放前先判<strong>直链还剩多久</strong>（B 站读 <code>deadline</code>，QQ / 网易云用签发时间加保守窗口），<strong>新鲜就零请求原样播</strong>，只有真过期才解析一次；解析不出来会明说「这首在线曲目打不开」并<strong>停下</strong>。</li>
+      <li><strong>不再弹 foobar 自己的报错窗</strong>：死链不交给宿主，宿主就没有"打不开"的机会。所以「播放 › 弹出错误提示信息」保持你现在的设置即可，<strong>不需要</strong>全局关闭。</li>
+      <li><strong>媒体库点歌错位</strong>（"最近添加双击播到下一行"也是同一个原因）：行下标与过滤后的路径数组错位，现在做显式映射，没有可用路径的行会提示并中止。</li>
+      <li><strong>媒体库切页卡顿</strong>：卡顿不在"整库加载"，而在原来 2000 一页的串行重建 —— 现在一次整库请求（宿主留着缓存 + 工作线程构建），被拒 / 超时自动退回分页；每行封面的目录扫描并发上限 2 批。</li>
+      <li><strong>添加文件夹扫不到歌</strong>：旧实现依赖插件 2.0.0 下已不存在的兼容层，现在改用宿主 <code>file.exists</code> + <code>file.list</code>，失败原因如实提示。</li>
+      <li><strong>喜欢进「我喜欢的音乐」</strong>：爱心按钮与右键「评分」走同一条路 —— 评 5 星即加入歌单（没有就创建），4 星及以下 / 清除评分则移出（正在播放的那一首会跳过，避免打断播放）。</li>
+      <li><strong>一批状态类小毛病</strong>：B 站翻页回来「已选」数翻倍、下载在解析阶段点「停止」无效、上一首回溯遇到直链刷新会写重复历史、媒体库清空后仍显示旧列表、B 站搜索打断翻页后翻页按钮置灰 —— 都已修。</li>
+      <li><strong>QQ 音乐重播提示「找不到 / 像是要 VIP」</strong>：重解析直链时漏传了 songmid，接口对空 songmid 只回空直链（实测），于是每次重播都必然失败、还被误报成版权 / 会员限制。现在解析时把 songmid、时长与直链到期时间一并记住，重播按 songmid 精确重解析，老记录用「歌手 + 歌名 + 时长」重搜兜底。</li>
+      <li><strong>网易云「不登录能听、登录反而不行」</strong>：带登录 Cookie 的那条解析请求被服务端拒绝（Cookie 失效 / 账号受限），旧版却报成「无版权 / 需会员」。现在这类曲目会<strong>自动用匿名再要一次</strong>并提示「已自动改用匿名音源」；两边都拿不到时才报错，且提示指向「Cookie 可能已失效」。</li>
+      <li><strong>新增 Bilibili 在线音源页</strong>：搜索 / 贴链接或 BV 号播放 / 分 P / 固定歌单「B站音乐」，封面接进统一封面链路。</li>
+      <li><strong>Bilibili 也能下载</strong>：「下载选中」→ <code>&lt;配置目录&gt;\B站音乐下载\</code>，MP4 + 同名 <code>.lrc</code>（歌词由多源聚合匹配，匹配不上就不写）；长视频的多段 <code>durl</code> 自动拼接。</li>
+    </ul>
+    <p style="margin:16px 0 8px"><strong>v3.0.0 做了什么</strong></p>
     <ul>
       <li><strong>适配插件 2.0.0</strong>：修掉 3 处会被严格校验拒绝的调用（进度跳转 / 「全部歌曲」/ 专辑封面），并接上实时声场、播放时钟、歌单 GUID、无边框小窗等新能力。</li>
       <li><strong>入口重排</strong>：「更多」菜单收成四段（歌词 / 窗口 / 音频 / foobar2000，沿用旧版分区顺序），长内容折叠成组；低频项与排障工具搬进新增的「设置与工具」页（不占侧边栏）。</li>
       <li><strong>频谱五种显示</strong>：频谱条 / 声场 / 瀑布图 / 示波器 / 矢量示波器，配统一的可视化调度器（多视图各自注册、暂停即停）。</li>
       <li><strong>小窗（迷你播放器 / 歌词窗）</strong>：独立窗口 —— 主窗口最小化 / 进托盘时不再跟着消失，Win+D 也不收走；无响应自动关掉重开、无封面时用默认封面；排版、居中、DPI 尺寸、跨窗口设置归属都已修好。</li>
       <li><strong>常驻托盘</strong>：图标 + 原生菜单（页面挂起时播放控制仍可用），左键单击 / 双击都把主窗口叫回前台。</li>
-      <li><strong>歌词与在线音源</strong>：歌词多源（LRCLIB / 网易云 / QQ）+ 候选面板；页内「QQ 音乐」「网易云」两个在线音源。</li>
+      <li><strong>歌词与在线音源</strong>：歌词多源（LRCLIB / 网易云 / QQ）+ 候选面板；页内「QQ 音乐」「网易云」「Bilibili」三个在线音源。</li>
       <li><strong>修掉的一批问题</strong>：播放顺序点了「随机」实际下发成 shuffle-tracks、图标读不回真实档位（宿主 order 是序号不是 foobar 标志位）；换歌瞬间「保存歌词 / 嵌入标签」会把上一首的原文写进新曲目；「流派」页因多传参数被宿主整单拒绝（插件更新后接口变严格）；筛选零命中会显示整张歌单、筛选框的 × 常驻；「上次听歌的歌单」按名称恢复失效；进度条不可跳转时没有视觉反馈；DPI 变化只第一次能感知；小窗置顶按钮在失败时也点亮。</li>
       <li><strong>移除自绘桌面歌词</strong>：桌面歌词仍走 ESLyric（显示 / 置顶 / 锁定 / 重置）。</li>
       <li><strong>移除试听功能</strong>：右键的「试听（不加入歌单）/ 停止试听」与页内 <code>&lt;audio&gt;</code>、JIT 无痕试听整条链路全部删除（试听会与正常播放抢音频输出，宿主又没有可靠的失败信号），原位置换成「添加到插入队列」。</li>
@@ -432,7 +447,7 @@
       <li><strong>翻译 / 音译</strong>：同一时间戳下的多行（原文 + 译文，或再加音译）会作为一组显示 —— 主行下方以更小更暗的副行呈现，整组一起高亮、一起居中，任何一行都不会被丢弃</li>
       <li><strong>纯文本歌词</strong>：无时间轴的歌词以静态文本展示（不会误当作同步歌词而“末行恒亮”）</li>
       <li><strong>点击跳转</strong>：点击任意歌词行可跳转到对应时间点播放</li>
-      <li><strong>歌词来源（本地优先）</strong>：先找音频同目录的<strong>同名 <code>.lrc</code></strong> 与 <code>%profile%\lyrics</code> 歌词库 —— 你自己精修过的词优先，读文件也更快、不依赖网络；本地没有时才经页内桥接联网匹配（在线曲目按直链归属分发：QQ 音乐走 <code>QQBridge</code>，网易云走 <code>NeteaseBridge</code> —— 后者能用播放时记下的「直链 → 歌曲 id」映射按 id 精确取词）。桌面歌词窗口与 ESLyric 工具菜单需要 foo_uie_eslyric 组件</li>
+      <li><strong>歌词来源（本地优先）</strong>：先找音频同目录的<strong>同名 <code>.lrc</code></strong> 与 <code>%profile%\lyrics</code> 歌词库 —— 你自己精修过的词优先，读文件也更快、不依赖网络；本地没有时才经页内桥接联网匹配（在线曲目按直链归属分发：QQ 音乐走 <code>QQBridge</code>，网易云走 <code>NeteaseBridge</code> —— 后者能用播放时记下的「直链 → 歌曲 id」映射按 id 精确取词；B 站直链同样有「直链 → 视频」映射，但 B 站自己没有歌词接口，只能拿映射出的标题 + UP 主去 LRCLIB / 网易云 / QQ 匹配，命中率看运气）。桌面歌词窗口与 ESLyric 工具菜单需要 foo_uie_eslyric 组件</li>
       <li><strong>多编码支持</strong>：内置 8 层编码检测引擎，可正确识别 GBK/GB18030、UTF-8、UTF-16 编码的 LRC 文件；其他亚洲双字节编码（Big5 / Shift_JIS / EUC）按评分制区分。含引号等特殊标签名也能正确定位</li>
       <li><strong>右键菜单</strong>：在<strong>歌词面板</strong>或<strong>沉浸式页面的歌词区</strong>右键即可打开菜单 ——「翻译对齐方式」是一个二级菜单（鼠标悬停展开，当前项带 ✓）：<strong>自动识别</strong>（自动判断歌词格式）/ <strong>标准双语</strong>（原词和翻译在同一时间）/ <strong>兼容旧版</strong>（翻译在下一句时间）；再往下是 <strong>刷新歌词</strong>，以及三个二级菜单 / 条件项：<strong>歌词工具</strong>（搜索歌词… / 复制歌词 / 嵌入到歌曲标签 / 保存歌词到文件）、<strong>小窗</strong>（迷你播放器 / 歌词窗）、<strong>恢复自动匹配</strong>（手动挑过歌词时才出现），最后是 <strong>打开所在文件夹</strong>。选择<strong>按文件记忆</strong>，选「自动识别」即恢复。手动指定的两种模式按所选写法<strong>机械处理</strong>、不做语言分析（标准双语下同刻多行一律「首句为主、其余为副」），自动识别判不准的文件指定一下即可。歌词没有重复时间戳时（纯文本、逐字歌词等）<strong>不显示对齐这一项</strong>，因为此时不存在对齐问题</li>
     </ul>
@@ -551,7 +566,7 @@
     </div>
     <div class="callout">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-      <div class="callout-text">标签写入为异步操作，保存后面板会自动关闭并在写入完成后刷新播放列表。只有实际修改的字段才会被写入文件。<strong>在线曲目</strong>（QQ 音乐 / 网易云直链）没有本地文件，这项会置灰并在提示里说明 —— 需要改标签请先「下载选中」落盘。</div>
+      <div class="callout-text">标签写入为异步操作，保存后面板会自动关闭并在写入完成后刷新播放列表。只有实际修改的字段才会被写入文件。<strong>在线曲目</strong>（QQ 音乐 / 网易云 / Bilibili 直链）没有本地文件，这项会置灰并在提示里说明 —— 需要改标签请先在对应页面「下载选中」落盘（三个在线音源页都支持下载）。</div>
     </div>
   </div>
 </div>
@@ -647,8 +662,8 @@
   </div>
   <div class="section-body">
     <ul>
-      <li><strong>评分</strong>：右键曲目 → 「评分」（二级菜单，鼠标悬停展开），点 1-5 星；同一菜单里还有「清除评分」</li>
-      <li><strong>喜欢按钮</strong>：底栏爱心按钮，点击=评 5 星，再次点击=清除评分（评分 ≥ 4 星视为"喜欢"）</li>
+      <li><strong>评分</strong>：右键曲目 → 「评分」（二级菜单，鼠标悬停展开），点 1-5 星；<strong>评 5 星同时把这一首加入「我喜欢的音乐」</strong>（与爱心按钮同一套口径），评 4 星及以下或「清除评分」会把它移出；同一菜单里还有「清除评分」</li>
+      <li><strong>喜欢按钮</strong>：底栏爱心按钮，点击=评 5 星并把这一首加入「我喜欢的音乐」歌单；再次点击=清除评分并从该歌单移出（正在播放的那一首会先留在歌单里，切歌后再点一次即可移除 —— foobar2000 删掉正在播的行会直接打断播放）</li>
       <li><strong>评分存储</strong>：优先存储在 foo_playcount 统计中，回退写入文件 RATING 标签</li>
     </ul>
     <div class="callout">
@@ -833,7 +848,7 @@
       <li><strong>VIP / 无损</strong>：右上角「设置 Cookie」按面板说明操作 —— 浏览器登录 <code>y.qq.com</code> → F12 控制台运行 <code>copy(document.cookie)</code> → 把 Cookie 粘回面板保存。免费曲库不需要登录；Cookie 失效时表现为 VIP 曲目全部解析不到（重贴一次即可）。</li>
     </ol>
     <ul>
-      <li><strong>在线播放固定 MP3 流播</strong>：QQ 的 CDN 给所有直链打的 <code>Content-Type</code> 都是 <code>audio/x-ogg</code>，foobar2000 会按类型把 FLAC / AAC 直链误当 Ogg 拒解（提示「不支持的格式或文件损坏」），所以在线播放只解析 MP3 档（320 → 128）。<strong>要无损 / Hi-Res / 母带，请用「下载选中」落盘后本地播放</strong>（文件字节完好）。</li>
+      <li><strong>在线播放固定 MP3 流播</strong>：未登录时 QQ 服务端对无损 / 母带档一律不给直链；登录态无损（FLAC）直链的 <code>Content-Type</code> 已实测为 <code>audio/x-ogg</code>（镜像主机全部一致、双协议相同；字节其实是 <code>fLaC</code>），foobar2000 按类型选解码器当作 Ogg 拒解（提示「不支持的格式或文件损坏」），所以在线播放只解析 MP3 档（320 → 128）。<strong>要无损 / Hi-Res / 母带，请用「下载选中」落盘后本地播放</strong>（文件字节完好）。</li>
       <li><strong>vkey 过期</strong>：歌单里存的是带签名的 CDN 直链，约两小时过期 —— 过期条目再点会播放失败，回页面重新勾选播放即可刷新。想长期保存就下载落盘。</li>
       <li><strong>封面与歌词自动匹配</strong>：在线曲目的封面由直链里的 mediaMid 反查腾讯图床（随播放 / 下载记录，缓存复用）；歌词按「标题 + 歌手 + 时长」多轮放宽搜索匹配，本地同名 <code>.lrc</code> 与 <code>%profile%\lyrics</code> 歌词库<strong>优先</strong>。歌词面板右键的「刷新歌词」会同时清掉在线匹配缓存。</li>
       <li><strong>在线曲目没有本地文件</strong>：右键菜单的「编辑标签」「在资源管理器中显示」会置灰并说明原因，批量标签编辑自动跳过它们；星级评分、封面、歌词、波形、插队（下一首播放 / 添加到插入队列）都不受影响。需要改标签请先下载落盘。</li>
@@ -850,7 +865,7 @@
     </div>
     <div>
       <div class="section-title">网易云音乐在线音源</div>
-      <div class="section-desc">在线无损 · 免登录额度更宽 · 贴链接导歌单</div>
+      <div class="section-desc">在线 320K MP3 · 无损可下载 · 免登录额度更宽</div>
     </div>
   </div>
   <div class="section-body">
@@ -858,7 +873,7 @@
     <ol class="steps">
       <li><strong>搜索</strong>：输入歌名 / 歌手 / 专辑后回车。「加载更多」把下一页追加到列表末尾（已勾选不受翻页影响，可跨页攒一批），下方翻页条可整页跳转。<strong>网易云的搜索接口有限流</strong>（连打十几次会回「操作频繁」），桥接已把搜索串行化并留最小间隔；真被限流时状态栏会提示稍后再试，且<strong>只影响搜索</strong> —— 直链 / 歌词 / 封面照常工作。</li>
       <li><strong>勾选与播放</strong>：点行首复选框或整行勾选，右侧「播放」/ 双击整行 = 立刻播放这一首。「在 foobar2000 播放」把勾选的曲目<strong>追加</strong>到固定的「网易云音乐」歌单末尾并从新曲开播（与「QQ音乐」歌单分开，一眼看得出曲目来自哪个平台）。</li>
-      <li><strong>音质</strong>：下拉框有 标准 128K / 较高 192K / 极高 320K / 无损 FLAC / Hi-Res，<strong>同时作用于在线播放与下载</strong>（不像 QQ 页那样只能流播 MP3）。要不到的档位会自动降级，并按接口返回的真实档位回填，不会把降级结果报成无损；无损 / Hi-Res 需要会员登录。</li>
+      <li><strong>音质</strong>：下拉框有 标准 128K / 较高 192K / 极高 320K / 无损 FLAC / Hi-Res，<strong>同时作用于在线播放与下载</strong>。无损 / Hi-Res 在线流播是可行的（2026-10-24 定位到真凶）：foobar2000 的<strong>明文 HTTP</strong> 读取路径与网易云 CDN 在 FLAC 直链上不兼容——播到 ~0.5 秒就停滞，同一文件换成 <strong>https</strong> 却完美正常（时长 / 实时进度 / 拖动都实测过）；另外部分 CDN 镜像还会把 FLAC 直链的 <code>Content-Type</code> 错标成 <code>audio/mpeg</code>，foobar 按类型选解码器会直接拒解。主题把无损直链交给 foobar 前会自动整理成「https + 探测过的可流播镜像」（16 字节探测把关），整理不出来自动回落 320K MP3，并按接口返回的真实档位如实回填；老歌单里已经写死的 http <code>.flac</code> 地址会在播放前自动重解析成可流播直链。QQ 页不受此影响（那边未登录拿不到无损直链，维持在线 MP3 / 无损走下载）。</li>
       <li><strong>下载</strong>：点「下载选中」落盘到 <code>&lt;foobar2000 配置目录&gt;\网易云音乐下载\</code>（音频 + 同名 <code>.lrc</code> 一起写入，歌词按歌曲 id 精确取词）。列表上方常驻「下载保存到 …」条；下载中再点一次 = 停止。</li>
       <li><strong>导入歌单</strong>：点「导入歌单」→ 粘贴<strong>歌单链接或 ID</strong>（如 <code>https://music.163.com/#/playlist?id=3778678</code> 或 <code>3778678</code>）→ 指定目标歌单名 → 开始导入。公开歌单与官方榜单<strong>免登录</strong>就能读到全部曲目，不需要 QQ 那种导出脚本；批量解析一次 10 首、并发 3 条，单次上限 300 首。</li>
     </ol>
@@ -866,7 +881,38 @@
       <li><strong>会员曲目会明确标注</strong>：未登录 / 非会员时，会员曲目的直链接口<strong>照样返回一个能播的 URL，但内容是 30/45 秒片段</strong>。这类曲目在列表里标「VIP · 试听」，播放与下载都会跳过并说明原因（例如「仅 45 秒试听，需登录会员」）—— 不会往歌单里塞 30 秒的"歌"。列表里能完整播放的曲目会标出真实档位（如「320K」「无损」）。</li>
       <li><strong>登录（要无损 / 会员曲目时）</strong>：点「登录 / Cookie」展开面板（与「QQ 音乐」页同一套最简模型：<strong>再点一次收起（与「导入歌单」共用同一套开关实现），面板里也有「收起」</strong>，面板与搜索 / 列表共存；取 Cookie 的步骤收在「怎么取？」里按需展开）—— 面板里填 Cookie —— <code>F12</code> → <code>网络 / Network</code> → 刷新 → 任选请求 → 右键「以 cURL 格式复制」→ 整条粘贴进面板（解析器会挑出 Cookie），或从 <code>应用 / Application → 存储 → Cookie → https://music.163.com</code> 复制 <code>MUSIC_U</code>。之所以不能"一条命令直接拿"：<code>MUSIC_U</code> 是 <strong>HttpOnly</strong>，页面 JS（含控制台）读不到，localStorage / sessionStorage / IndexedDB 里也没有副本。保存后<strong>当场校验</strong>：调账号 + 会员接口，回报「登录成功 + 会员有效期至 X」。</li>
       <li><strong>在线曲目没有本地文件</strong>：右键菜单的「编辑标签」「在资源管理器中显示」会置灰并说明原因，批量标签编辑自动跳过它们；星级评分、封面、歌词、波形、插队（下一首播放 / 添加到插入队列）都不受影响。需要改标签请先下载落盘。</li>
-      <li><strong>诊断入口</strong>：<code>NeteaseBridge.bridgeInfo()</code>（版本 / 登录态 / 各缓存条数 / 限流剩余秒数 / 在途请求数）、<code>NeteaseBridge.selfcheckState()</code>（随页面加载跑的一次自检：搜索 / 解析 / 取词三步哪一步断了）、<code>CM.netease.state</code>（页面状态）。</li>
+      <li><strong>诊断入口</strong>：<code>NeteaseBridge.bridgeInfo()</code>（版本 / 登录态 / 各缓存条数 / 限流剩余秒数 / 在途请求数）、<code>NeteaseBridge.selfcheckState()</code>（随页面加载跑的一次自检：搜索 / 解析 / 取词三步哪一步断了）、<code>NeteaseBridge.probeStream('&lt;直链&gt;')</code>（量这条直链的 <code>status / contentType / acceptRanges / firstBytes / isFlac</code>，用来确认"服务器把格式标成了什么"）、<code>CM.netease.state</code>（页面状态）。</li>
+    </ul>
+  </div>
+</div>
+
+<!-- 23 Bilibili 在线音源 -->
+<div class="section" id="s23">
+  <div class="section-header">
+    <div class="section-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="7" width="18" height="13" rx="3"/><polyline points="7 3 12 7 17 3"/><polygon points="10 11 15 13.5 10 16 10 11"/></svg>
+    </div>
+    <div>
+      <div class="section-title">Bilibili 在线音源</div>
+      <div class="section-desc">视频音轨当音源 · 免登录 · 可流播可落盘</div>
+    </div>
+  </div>
+  <div class="section-body">
+    <p>侧边栏「<strong>Bilibili</strong>」页是第三个在线音源：搜索视频 → 勾选 → 「在 foobar2000 播放」或「下载选中」，或直接粘贴视频链接 / BV 号 / av 号播放单个视频。链路同样是<strong>页内桥接</strong>（<code>js/bilibili-core.js</code> + <code>js/ui-bilibili.js</code>），走宿主原生网络客户端，<strong>没有本地进程、端口、node.js，也不需要登录</strong>。</p>
+    <ol class="steps">
+      <li><strong>搜索</strong>：关键词回车（歌名 / 歌手 / 现场 / UP 主都行），每页 20 条 —— 这是 B 站 web 搜索接口固定页长，不是我们限的。翻页条可整页跳转；已勾选的条目<strong>跨页保留</strong>，可以攒一批一起播。</li>
+      <li><strong>勾选与播放</strong>：「在 foobar2000 播放」把勾选的视频<strong>追加</strong>到固定的「B站音乐」歌单末尾，并从新曲开播（与「QQ 音乐」「网易云音乐」两张歌单分开，一眼看得出曲目来自哪个平台）。行内「播放」按钮 / 双击整行 = 只播这一个。</li>
+      <li><strong>播一个链接</strong>：下方输入框粘贴视频页链接、<code>BV</code> 号或 <code>av</code> 号直接播（av 号走同一个详情接口的 <code>aid</code> 参数，实测可用）。<strong>多 P 视频</strong>默认第 1 P，想指定分 P 就把链接里的 <code>?p=N</code> 一起带上。</li>
+      <li><strong>音质与实现细节</strong>：固定走 <code>html5</code> 档，取到的是一个普通 <strong>MP4 容器（内含 AAC 音轨）</strong>，约 <strong>157kbps</strong>，foobar2000 按视频容器解析出音轨来播。之所以不用体积更小的 DASH 纯音轨：DASH 直链<strong>必须带 Referer</strong> 才不是 403，而宿主流播时发不了自定义请求头 —— 那正好会表现为"这首还没开始就自动跳到下一首"。</li>
+      <li><strong>直链会过期，但只在真过期时才重解析</strong>：B 站直链自带 <code>deadline=&lt;unix 秒&gt;</code>（实测 = 签发时刻 + 2 小时），主题直接读它判断是否还有效 —— 刚搜出来就播的曲目<strong>一个多余的请求都不会发</strong>；只有确实过期（或判不出来）才按「直链 → 视频」映射回头解析一次，结果缓存 2 分钟（连点 / 重播 / 鼠标按下时的预取都复用它，不会重复请求）。解析需要联网时，超过 0.6 秒会提示「正在重新解析直链」，不会让人干等着猜。地址换了就用新地址播（歌单里的旧行原样保留）；解析不出来会直接告诉你「这首在线曲目打不开」并<strong>停下</strong>，<strong>不会</strong>让 foobar 静默跳到别的歌。</li>
+    </ol>
+    <ul>
+      <li><strong>下载</strong>：点「下载选中」逐个落盘到 <code>&lt;foobar2000 配置目录&gt;\B站音乐下载\</code>（MP4 + 同名 <code>.lrc</code>，下载中再点一次 = 停止，当前这个下完就停）。扩展名是 <code>.mp4</code> —— html5 档落地的是含 <code>avc1</code> 视频轨的 MP4（4.5 分钟约 5.1MB），foobar2000 播放时只取音轨；长视频的 <code>durl</code> 会被切成多段，下载时逐段落盘为临时文件后按字节拼接，拼完即清。首轮下载后会出现「下载保存到」条，可直接打开文件夹 / 复制路径。</li>
+      <li><strong>封面</strong>：列表缩略图与播放中底栏 / 现在播放的封面都取 B 站自己的视频封面（<code>pic</code>），经宿主 HTTP 取字节转成 data URL —— 列表用 <code>@160w_160h</code>、播放封面用 <code>@480w_480h</code>，原图 200~600KB 缩到 6~20KB；免登录、免 Referer，取主色调也正常（直接挂 CDN 地址会因为跨域取不到色）。</li>
+      <li><strong>歌词</strong>：靠标题 + UP 主去 LRCLIB / 网易云 / QQ 匹配（B 站自己没有歌词接口），命中率不保证；下载时的 <code>.lrc</code> 走同一套多源匹配，匹配不上就不写。</li>
+      <li><strong>什么时候需要重新搜一次</strong>：从「直链 → 视频」的映射最多记 400 条，超出后最旧的会被裁掉。被裁掉的那些行再点会提示「映射丢了，重新搜索这个视频再播一次即可」—— 直链文件名里的数字是 B 站的 <code>cid</code>，而取流接口必须同时有视频号（BV/av），只凭 cid 反推不出来，所以这里只能重新搜。</li>
+      <li><strong>风控相关</strong>：B 站接口要求 WBI 签名（主题自带同步 MD5 现算），签名按 6 小时失效，遇到 <code>-403</code> 会自动重取一次；批量解析固定并发 2 条。偶发「搜索失败」多半是被风控了，稍后再试或刷新页面即可。</li>
+      <li><strong>诊断入口</strong>：<code>BilibiliBridge.bridgeInfo()</code>（版本 / 签名是否就绪 / 寿命 / 直链映射条数 / 网络错误数）、<code>CM.bilibili.state</code>（页面状态）。</li>
     </ul>
   </div>
 </div>
@@ -875,7 +921,7 @@
 
 <!-- Footer -->
 <div class="footer">
-  <p class="footer-author">CloudMusic 主题 v3.0.0 · 作者：灵芝含</p>
+  <p class="footer-author">CloudMusic 主题 v3.0.1 · 作者：灵芝含</p>
   <p>基于 foo_ui_webview2 SDK 2.0.0 · foobar2000 v2</p>
   <p>感谢使用，享受音乐</p>
 </div>

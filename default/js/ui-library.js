@@ -143,6 +143,15 @@
         var resetAddAllBtn = function() {}; // 每次点击时由 setBtnLoading 生成
         addAllBtn.addEventListener('click', function(e) {
           resetAddAllBtn = CM.setBtnLoading(addAllBtn, '加载曲目中...');
+          // 已经在「全部歌曲」里拉过整库就直接用（宿主那边也留着这份列表）——
+          // 以前这里会为了"添加全部"再整套重拉一遍
+          if (_songsCache && _songsCache.tracks.length) {
+            var cachedPaths = CM.trackPaths(_songsCache.tracks);
+            resetAddAllBtn();
+            if (!cachedPaths.length) { CM.showToast('未找到曲目路径', null, 'error'); return; }
+            CM.showAddToPlaylistMenu(e.clientX, e.clientY, cachedPaths);
+            return;
+          }
           CM.api('library.getCount').then(function(cr) {
             if (!cr) { resetAddAllBtn(); CM.showToast('加载失败', null, 'error'); return; }
             var total = CM.respCount(cr);
@@ -243,63 +252,150 @@
     );
   };
 
-  // 全部歌曲视图：自动分页加载全部曲目
+  // 全量曲目缓存：切走再切回「歌曲」时先用上次结果直接渲染，后台再核对总数 ——
+  // 三千首每次切进来都重拉一遍（6 次 500 条）就是用户报的"切媒体库卡死"。
+  var _songsCache = null;   // { total, tracks }
+  CM.invalidateSongsCache = function() { _songsCache = null; };
+  // 整库单次请求被宿主拒绝时只提示一次（避免每进一次「全部歌曲」刷一条 warn）
+  var _fullLoadWarned = false;
+
+  // 全部歌曲视图：分页加载全部曲目
   CM.renderLibraryTracks = function() {
     state.libraryBack = 'stats';
     var isCurrent = libBegin();
     var cancelLoading = CM.libLoadingDelayed();
-    CM.api('library.getCount').then(function(cr) {
-      if (!isCurrent()) { cancelLoading(); return; }
-      var total = CM.respCount(cr);
-      if (!total) { cancelLoading(); els.libraryDetail.innerHTML = CM.emptyHTML('媒体库为空'); return; }
-      var PAGE = 500;
+    function paint(tracks, total) {
+      if (!isCurrent()) return;
+      cancelLoading();
+      CM.renderLibraryDrill('全部歌曲', total + ' 首曲目', tracks, { pageSizes: LIB_PAGE_SIZES, pageKey: 'songTracks' });
+      CM.libFadeIn();
+      // 追加"刷新媒体库"按钮
+      var btnBar = CM.$('libAddToPlBtn');
+      var btnParent = btnBar ? btnBar.parentElement : null;
+      if (btnParent) {
+        var refBtn = document.createElement('button');
+        refBtn.className = 'pl-btn';
+        refBtn.innerHTML = CM.icons.refresh + '<span>刷新媒体库</span>';
+        btnParent.insertBefore(refBtn, btnParent.firstChild);
+        refBtn.addEventListener('click', function() {
+          var resetRefBtn = CM.setBtnLoading(refBtn, '扫描中...');
+          CM.api('library.refresh').then(function(res) {
+            if (res && res.success !== false) {
+              CM.showToast('媒体库已刷新', '正在重新加载歌曲列表', 'success');
+              CM.invalidateSongsCache();
+              CM.renderLibraryTracks();
+            } else {
+              CM.showToast('刷新失败', null, 'error');
+              resetRefBtn();
+            }
+          });
+        });
+      }
+    }
+    function fetchAll(total, done) {
+      /* 宿主 v2 的 library.getAll 有两个能力以前完全没用上：
+         · 一次「从 0 取到 total」的请求会被宿主**留在自己的缓存里**（useCache；
+           文档原话：A request from 0 covering every track is kept either way），
+           下次进「全部歌曲」直接命中，不必重建；
+         · asyncResult 让宿主在自己的工作线程上建这份列表、用 library:getAllResult
+           事件送回 —— 不带它就是在宿主 UI 线程上建，建的过程中 foobar 界面是冻的。
+         以前按 2000 一页分两次要、也没带 asyncResult：三千首时每一页都在主线程上建，
+         这才是"切媒体库卡死"的主因（一次整库回包约 1~2MB，传输本身不是瓶颈）。
+         接口不存在 / 被拒（老宿主）时退回原来的分页取法。 */
+      var lib = (typeof window !== 'undefined' && window.fb && window.fb.library) || null;
+      // 超大纲不一次拿（一次要回几十万行没必要，也怕宿主自己给 limit 设了上限）
+      if (lib && typeof lib.getAll === 'function' && total <= 20000) {
+        lib.getAll(0, total, { useCache: true, asyncResult: true, timeout: 10000 })
+          .then(function(r) {
+            if (!isCurrent()) return;
+            if (r && r.success === false) {
+              if (!_fullLoadWarned) {
+                _fullLoadWarned = true;
+                try { console.warn('[CloudMusic] library.getAll(整库) 被拒：' + (r.code || '') + ' ' + (r.error || '') + ' → 退回分页'); } catch (e) {}
+              }
+              fetchPaged(total, done);
+              return;
+            }
+            var tracks = CM.respTracks(r);
+            // 宿主把 limit 截断过（回得比 total 少）→ 按页补齐，别把半张列表当全部
+            if (tracks.length >= total) { done(tracks, total); return; }
+            fetchPaged(total, done);
+          }, function(e) {
+            if (!isCurrent()) return;
+            if (!_fullLoadWarned) {
+              _fullLoadWarned = true;
+              try { console.warn('[CloudMusic] 整库请求失败（' + ((e && e.message) || e) + '）→ 退回分页'); } catch (e2) {}
+            }
+            fetchPaged(total, done);
+          });
+        return;
+      }
+      fetchPaged(total, done);
+    }
+    // 兜底：老宿主 / 整库请求被拒时按页取（每页 2000，三千首两次往返）
+    function fetchPaged(total, done) {
+      // 每页 2000：三千首只需 2 次往返（以前固定 500，要 6 次串行，全部拉完才画第一屏）。
+      // v2：分页参数名是 offset / limit（旧名 start / count 会被严格校验整体拒绝）。
+      var PAGE = 2000;
       var all = [];
       var offset = 0;
       var loadPage = function() {
-        // v2：分页参数名是 offset / limit（旧名 start / count 会被严格校验整体拒绝）
         CM.api('library.getAll', { offset: offset, limit: Math.min(PAGE, total - offset) }).then(function(r) {
-          if (!isCurrent()) { cancelLoading(); return; }
+          if (!isCurrent()) return;
           if (!r || r.success === false) {
-            cancelLoading();
             // 第 1 页成功、后续页失败时页面上还挂着 loading：必须给出明确错误态
             // （带重试按钮），不能让"加载中"永远转下去
-            CM.libError(CM.renderLibraryTracks);
+            if (!all.length) { cancelLoading(); CM.libError(CM.renderLibraryTracks); }
+            // 只拿到一部分：按**实际拿到的条数**收尾（用 total 会让标题写着 3000 首、
+            // 列表里只有 2000 行）；下次进来缓存条数对不上总数，会自动重拉
+            else done(all, all.length);
             return;
           }
           var batch = CM.respTracks(r);
-          all = all.concat(batch);
+          for (var i = 0; i < batch.length; i++) all.push(batch[i]);
           offset += batch.length;
-          if (batch.length > 0 && offset < total) {
-            loadPage();
-          } else {
-            cancelLoading();
-            CM.renderLibraryDrill('全部歌曲', total + ' 首曲目', all, { pageSizes: LIB_PAGE_SIZES, pageKey: 'songTracks' });
-            CM.libFadeIn();
-            // 追加"刷新媒体库"按钮
-            var btnBar = CM.$('libAddToPlBtn');
-            var btnParent = btnBar ? btnBar.parentElement : null;
-            if (btnParent) {
-              var refBtn = document.createElement('button');
-              refBtn.className = 'pl-btn';
-              refBtn.innerHTML = CM.icons.refresh + '<span>刷新媒体库</span>';
-              btnParent.insertBefore(refBtn, btnParent.firstChild);
-              refBtn.addEventListener('click', function() {
-                var resetRefBtn = CM.setBtnLoading(refBtn, '扫描中...');
-                CM.api('library.refresh').then(function(res) {
-                  if (res && res.success !== false) {
-                    CM.showToast('媒体库已刷新', '正在重新加载歌曲列表', 'success');
-                    CM.renderLibraryTracks();
-                  } else {
-                    CM.showToast('刷新失败', null, 'error');
-                    resetRefBtn();
-                  }
-                });
-              });
-            }
-          }
+          if (batch.length > 0 && offset < total) { loadPage(); return; }
+          // 中途回空页（offset<total 却没有行）：total 不可信，按实际条数收尾 ——
+          // 缓存条数对不上总数，下次进来会自动重拉（与上面失败分支同一口径）
+          done(all, all.length);
         });
       };
       loadPage();
+    }
+
+    // 有缓存：先画出来（零等待），再核对总数决定要不要重拉
+    if (_songsCache && _songsCache.tracks.length) {
+      paint(_songsCache.tracks, _songsCache.total);
+      CM.api('library.getCount').then(function(cr) {
+        if (!isCurrent()) return;
+        // 失败信封 / invoke 异常都不是"媒体库为空"：宿主没答上来时缓存还在就
+        // 继续用，别把 3000 首的库在一次瞬时失败后显示成空
+        if (!cr || cr.success === false) return;
+        var total = CM.respCount(cr);
+        // 媒体库被清空（total 0）时不能继续显示缓存：丢掉缓存并给空态
+        if (!total) {
+          _songsCache = null;
+          els.libraryDetail.innerHTML = CM.emptyHTML('媒体库为空');
+          return;
+        }
+        if (total === _songsCache.total) return;
+        fetchAll(total, function(tracks, t) {
+          _songsCache = { total: t, tracks: tracks };
+          paint(tracks, t);
+        });
+      });
+      return;
+    }
+    CM.api('library.getCount').then(function(cr) {
+      if (!isCurrent()) { cancelLoading(); return; }
+      // 查询失败 ≠ 空库：给错误态（带重试），不能显示"媒体库为空"
+      if (!cr || cr.success === false) { cancelLoading(); CM.libError(CM.renderLibraryTracks); return; }
+      var total = CM.respCount(cr);
+      if (!total) { cancelLoading(); els.libraryDetail.innerHTML = CM.emptyHTML('媒体库为空'); return; }
+      fetchAll(total, function(tracks, t) {
+        _songsCache = { total: t, tracks: tracks };
+        paint(tracks, t);
+      });
     });
   };
 

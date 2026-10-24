@@ -222,7 +222,11 @@
         if (g) {
           for (var i = 0; i < lists.length; i++) {
             var gi = lists[i] || {};
-            if (gi.guid === g && gi.index != null) return gi.index;
+            // guid 命中还要核对名字：这个键被「固定歌单」与「导入歌单」两路共用，
+            // 谁最后按名字命中/创建谁就会覆写它 —— 不核对名字两边会互相劫持
+            //（300 首导入曲被追加进固定歌单、或播放被追加进用户命名的导入歌单）
+            var gnm = gi.name || gi.title || '';
+            if (gi.guid === g && gnm === name && gi.index != null) return gi.index;
           }
         }
         for (var j = 0; j < lists.length; j++) {
@@ -245,14 +249,14 @@
       }
       return tryFind(4).then(function (idx) {
         if (idx >= 0) return idx;
-        return api('playlist.create', { name: name }).then(function (cr) {
+        return apiOr('playlist.create', { name: name }).then(function (cr) {
           if (cr && cr.guid) saveGuid(cr.guid);
           if (cr && cr.index != null) return cr.index;
           return tryFind(3).then(function (idx2) {
             if (idx2 >= 0) return idx2;
-            return api('playlist.getActive').then(function (a) {
-              return a && (a.index != null ? a.index : a.playlist);
-            });
+            // 建不出来也不能拿用户的**活动歌单**顶上 —— 那会把在线直链追加进
+            // 用户自己的歌单并从那里开播（静默降级）。回 -1，调用方如实报错。
+            return -1;
           });
         });
       });
@@ -341,6 +345,76 @@
           if (w) { w.settle(e); return; }
         }
       });
+    }
+
+    /* 多段下载（B 站长视频会被切成多段 durl）：
+       逐段落到 .pN 临时文件，再按字节拼成一个文件。
+       宿主 file.read 用 encoding:'binary' 回 base64、file.write 吃 `base64:` 前缀，
+       所以拼接在页面里做 —— 一两段 5MB 没问题，但要给总大小上限：
+       再大就会把 WebView 的字符串内存撑到几百 MB，宁可明确报错让人换工具。 */
+    var CONCAT_MAX = 32 * 1024 * 1024;
+    function b64ToBytes(b64) {
+      var bin = atob(b64), out = new Uint8Array(bin.length);
+      for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+    function bytesToB64(bytes) {
+      var CHUNK = 0x8000, s = '';
+      for (var i = 0; i < bytes.length; i += CHUNK) {
+        s += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+      }
+      return btoa(s);
+    }
+    function concatFiles(paths, dest) {
+      var bufs = [], total = 0;
+      var chain = Promise.resolve();
+      paths.forEach(function (path) {
+        chain = chain.then(function () {
+          return api('file.read', { path: path, encoding: 'binary' }).then(function (r) {
+            if (!r || typeof r.content !== 'string') throw new Error('读取分段失败：' + path);
+            var b = b64ToBytes(r.content);
+            total += b.length;
+            if (total > CONCAT_MAX) {
+              throw new Error('分段合计超过 ' + Math.round(CONCAT_MAX / 1048576) + 'MB，请改用其他工具下载');
+            }
+            bufs.push(b);
+          });
+        });
+      });
+      return chain.then(function () {
+        var all = new Uint8Array(total), at = 0;
+        bufs.forEach(function (b) { all.set(b, at); at += b.length; });
+        return api('file.write', {
+          path: dest, content: 'base64:' + bytesToB64(all), encoding: 'binary'
+        }).then(function (r) {
+          // 失败信封是正常 resolve 的真值：不判就会把写盘失败（磁盘满 / 权限 /
+          // 路径被拒）计成「下载完成 · 成功 N/N」，磁盘上其实没有文件
+          if (!r || r.success === false) {
+            throw new Error('拼接写盘失败：' + ((r && (r.error || hostErr(r))) || dest));
+          }
+          return r;
+        });
+      });
+    }
+
+    /* 一个计划项 → 一个文件：单段直接下，多段先下临时文件再拼（拼完 / 失败都清临时文件） */
+    function grabItem(it, saveTo) {
+      var parts = (it.parts && it.parts.length) ? it.parts : [it.url];
+      if (parts.length <= 1) return grabToFile(parts[0], saveTo);
+      var tmps = parts.map(function (_, i) { return saveTo + '.p' + (i + 1); });
+      function clean() {
+        tmps.forEach(function (tmp) {
+          api('file.delete', { path: tmp }).then(function () {}, function () {});
+        });
+      }
+      var chain = Promise.resolve();
+      tmps.forEach(function (tmp, i) {
+        chain = chain.then(function () { return grabToFile(parts[i], tmp); });
+      });
+      return chain.then(function () {
+        return concatFiles(tmps, saveTo).then(function (r) { clean(); return r; },
+                                                function (e) { clean(); throw e; });
+      }, function (e) { clean(); throw e; });
     }
 
     function grabToFile(url, saveTo) {
@@ -464,8 +538,16 @@
        onProgress 通常就是页面的 updateToolbar。 */
     function runDownloads(plan) {
       var state = cfg.state;
-      if (!plan.length) { toast('没有可下载的曲目', null, 'error'); return Promise.resolve(); }
-      if (state) { state.dlRun = true; state.dlCancel = false; state.dlDone = 0; state.dlTotal = plan.length; }
+      if (!plan.length) {
+        if (state) { state.dlRun = false; state.dlTotal = 0; }
+        if (cfg.onProgress) cfg.onProgress();
+        toast('没有可下载的曲目', null, 'error');
+        return Promise.resolve();
+      }
+      /* dlCancel 不在这里清：三个页面在「开始新一轮」时各自清（ui-bilibili 370 /
+         ui-qqmusic 540 / ui-netease 470）。这里清会把**解析阶段按下的停止**抹掉 ——
+         用户点了「停止」，解析完成后照样把一整批全下完。 */
+      if (state) { state.dlRun = true; state.dlDone = 0; state.dlTotal = plan.length; }
       if (cfg.onProgress) cfg.onProgress();
       var okN = 0, lyricOk = 0, fails = [];
       setStatus('开始下载 ' + plan.length + ' 首到 ' + dirName + '…');
@@ -477,7 +559,7 @@
           if (i >= plan.length) return Promise.resolve();
           var it = plan[i];
           setStatus('下载中 ' + (i + 1) + '/' + plan.length + '：' + it.name);
-          return grabToFile(it.url, joinPath(dir, it.name)).then(function () {
+          return grabItem(it, joinPath(dir, it.name)).then(function () {
             okN++;
             if (state) state.dlDone = i + 1;
             return saveLyric(it, dir).then(function (r) { if (r === 'ok') lyricOk++; });
@@ -545,7 +627,7 @@
       css: css, injectCss: injectCss,
       listsOf: listsOf, ensurePlaylist: ensurePlaylist, dedupePlaylists: dedupePlaylists,
       joinPath: joinPath, safeName: safeName, extOfUrl: extOfUrl, hostErr: hostErr,
-      dlSubscribe: dlSubscribe, grabToFile: grabToFile, downloadDir: downloadDir,
+      dlSubscribe: dlSubscribe, grabToFile: grabToFile, grabItem: grabItem, downloadDir: downloadDir,
       showDlRow: showDlRow, dlRowPath: dlRowPath, openDlFolder: openDlFolder, copyDlPath: copyDlPath,
       saveLyric: saveLyric, runDownloads: runDownloads,
       showSetup: showSetup, toggleSetup: toggleSetup, togglePanel: togglePanel,

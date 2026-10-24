@@ -66,7 +66,7 @@
   /* 只别名本页真正用到的（K.buildPlan / K.saveLyric 的包装原来也在这，但都被
      下面同名函数声明覆盖、从未执行过，连同 hostErr / listsOf / joinPath /
      grabToFile / showDlRow / dlRowPath 这些只有别名没有调用点的死别名一起删了） */
-  var $ = K.$, mmss = K.mmss, api = K.api, apiOr = K.apiOr, toast = K.toast, setStatus = K.setStatus,
+  var $ = K.$, mmss = K.mmss, apiOr = K.apiOr, toast = K.toast, setStatus = K.setStatus,
       copyText = K.copyText, ensurePlaylist = K.ensurePlaylist,
       dedupePlaylists = K.dedupePlaylists, safeName = K.safeName, extOfUrl = K.extOfUrl,
       downloadDir = K.downloadDir,
@@ -429,18 +429,23 @@
 
     var plName = QQ_PLAYLIST;
     var usedLabel = '';
-    /* 流播固定 MP3 档：CDN 把所有直链的 Content-Type 打成 audio/x-ogg，
-       foobar 按类型选解码器，FLAC/AAC 直链会被误当 Ogg 拒解（MP3 靠帧嗅探
-       不受影响）。无损 / Hi-Res 请用「下载选中」落盘后本地播放。 */
+    var skippedN = 0;   // 解析被跳过的首数：成功 toast 报实际追加数，不虚报
+    /* 流播固定 MP3 档：未登录时服务端对无损档一律不给直链（实测 M800/F000/
+       RS01/AI00 的 purl 全空）；登录态 F000（FLAC）直链的 Content-Type 已实测
+       （2026-10-24，会员 Cookie）：audio/x-ogg——五台流媒体镜像主机全部一致、
+       http / https 相同（字节其实是 fLaC），foobar 按类型选解码器当作 Ogg 拒解，
+       换 https 也救不了（不同于网易云：那边有 octet-stream 镜像且 https 能流）。
+       无损 / Hi-Res 请用「下载选中」落盘后本地播放（文件字节完好）。 */
     setStatus('正在解析 ' + tracks.length + ' 首曲目的音源（流播 MP3）…');
 
     QQBridge.resolveMany(tracks, 'mp3').then(function (r) {
       if (!r || !r.ok) throw new Error((r && r.error) || '音源解析失败');
       usedLabel = r.usedLabel || '';
       if (r.skipped && r.skipped.length) {
+        skippedN = r.skipped.length;
         toast('跳过 ' + r.skipped.length + ' 首',
               r.skipped.join('、') +
-              (S.hasCookie ? ' —— 这几首没有版权或已下架'
+              (S.hasCookie ? ' —— 没有版权 / 已下架，或 Cookie 已失效（重贴一次试试）'
                            : ' —— 需要先点右上角「设置 Cookie」'), 'error');
       }
       if (!r.urls || !r.urls.length) {
@@ -461,22 +466,15 @@
             // 必须用 addPathsSequential：playlist.addPaths 由 foobar 按"添加文件"的
             // 方式解析，**行不保持给定顺序** —— 那样 index: base 播的未必是这批第一首
             return apiOr('playlist.addPathsSequential', { playlist: idx, paths: r.urls })
-              .then(function (res) {
-                if (res.success === false) {
-                  throw new Error(res.error || '宿主拒绝写入歌单');
-                }
-                return apiOr('playlist.playTrack', { playlist: idx, index: base })
-                  .then(function (pr) {
-                    if (pr.success === false) {
-                      throw new Error(pr.error || '播放请求被宿主拒绝');
-                    }
-                  });
+              .then(function () {
+                // apiOr 已把失败信封转成 reject，这里不需要再判 success
+                return apiOr('playlist.playTrack', { playlist: idx, index: base });
               });
           });
       });
     }).then(function () {
       setStatus('已追加到 ' + plName + ' 并开播' + (usedLabel ? ' · ' + usedLabel : ''), 'ok');
-      toast('开始播放', plName + ' · 追加 ' + tracks.length + ' 首' +
+      toast('开始播放', plName + ' · 追加 ' + (tracks.length - skippedN) + ' 首' +
             (usedLabel ? ' · ' + usedLabel : ''), 'success');
       // getAll 抖动可能攒下同名歌单 —— 播放成功后顺手清一遍
       dedupePlaylists(plName);
@@ -661,9 +659,7 @@
                 if (!firstPlayed) {
                   firstPlayed = true;
                   return apiOr('playlist.playTrack', { playlist: idx, index: base })
-                    .then(function (pr) {
-                      if (pr.success === false) setStatus('开播请求被宿主拒绝，导入继续', 'warn');
-                    }, function () {});
+                    .then(null, function () {});
                 }
               }, function () { failed.push({ raw: it.raw, why: '写入歌单失败' }); });
             }, function (e) {

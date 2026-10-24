@@ -138,21 +138,30 @@
     return uniq(list);
   }
 
+  function readLrcFile(p) {
+    // 期望中的未命中（没放同名 .lrc / 歌词库里没有这首）不该刷控制台：直接走
+    // fb.invoke，失败 = 没有这个文件（CM.api 会把每次未命中都 console.warn，
+    // 每首歌切换最多 6 条 NOT_FOUND）。路径与顺序与旧版逐个试探完全一致。
+    return fb.invoke('file.read', { path: p, encoding: 'binary' }).then(function (fr) {
+      return (fr && fr.success !== false && fr.content &&
+              String(fr.content).replace(/\s/g, '').length > 0) ? fr : null;
+    }, function () { return null; });
+  }
+
   function readFirst(cands, loadId, onHit, onMiss) {
     var i = 0;
     function step() {
       if (loadId !== CM._lyricLoadId) return;
       if (i >= cands.length) { onMiss(); return; }
       var p = cands[i++];
-      CM.api('file.read', { path: p, encoding: 'binary' }).then(function (fr) {
+      readLrcFile(p).then(function (fr) {
         if (loadId !== CM._lyricLoadId) return;
-        if (fr && fr.success !== false && fr.content &&
-            String(fr.content).replace(/\s/g, '').length > 0) {
+        if (fr) {
           var text = CM.decodeTextBytes(fr.content);
           if (text && text.trim()) { onHit(p, text); return; }
         }
         step();
-      }).catch(function () { step(); });
+      });
     }
     step();
   }

@@ -8,10 +8,11 @@
  *   模块随主题页面加载，无本地进程 / 端口 / 外部运行时依赖。
  *
  * 与「QQ 音乐」页（ui-qqmusic.js）的差异（都是实测结果决定的）：
- *   · **在线播放不限制 MP3**：网易云 FLAC 直链的 Content-Type 是
- *     application/octet-stream（MP3 是 audio/mpeg），foobar 靠内容嗅探就能
- *     认出来；QQ 那边是 audio/x-ogg 会被误当 Ogg 拒解才只能流播 MP3。
- *     所以这里的音质下拉框同时管播放与下载。
+ *   · **无损 / Hi-Res 也能在线流播**（2026-10-24 定位真凶后恢复）：foobar 的
+ *     明文 HTTP 读取路径与网易云 CDN 在 FLAC 上不兼容（停滞在 ~0.5 秒），
+ *     **https 正常**；netease-core 的 streamifyUrl 会把无损直链整理成
+ *     「https + 探测过的非 audio/mpeg 镜像」，过不了关自动回落 320K MP3。
+ *     音质下拉框同时作用于在线播放与下载。
  *   · **歌单导入按 ID / 链接**：公开歌单与官方榜单免登录直接读全曲目，
  *     不需要 QQ 那套「复制导出脚本 → 控制台跑 → 文本匹配」。
  *   · **试听切片要标出来**：会员曲目在未登录/非会员时接口照样返回一个可播
@@ -73,7 +74,7 @@
      下面同名函数声明覆盖、从未执行过，连同 copyText / listsOf / joinPath /
      hostErr / grabToFile / showDlRow / dlRowPath 这些只有别名没有调用点的
      死别名一起删了）。下载 / 歌单写入的实现在 js/online-common.js。 */
-  var $ = K.$, mmss = K.mmss, api = K.api, apiOr = K.apiOr, toast = K.toast, setStatus = K.setStatus,
+  var $ = K.$, mmss = K.mmss, apiOr = K.apiOr, toast = K.toast, setStatus = K.setStatus,
       ensurePlaylist = K.ensurePlaylist,
       dedupePlaylists = K.dedupePlaylists, safeName = K.safeName, extOfUrl = K.extOfUrl,
       downloadDir = K.downloadDir,
@@ -108,11 +109,24 @@
     // 登录了就把账号与会员状态都查出来（有效期一并显示，省得用户猜 Cookie 是不是失效了）。
     // account() 是这里的关键：会员接口对**失效**的 Cookie 也只会安静地回 vip:false，
     // 少了它，状态栏会把"登录态已过期"说成「已登录（非会员）」。
-    if (S.hasCookie) {
-      NeteaseBridge.account().then(function (a) { S.acct = a; renderStatus(); }, function () {});
-      NeteaseBridge.vipInfo().then(function (v) { S.vip = v; renderStatus(); }, function () {});
-    }
+    if (S.hasCookie) fetchAcctState();
     return Promise.resolve(true);
+  }
+
+  /* 登录态查询的代际守卫：账号接口 8 秒超时，"清除 Cookie / 重存 Cookie"之后
+     旧 Cookie 的慢回包才到，会把 S.acct 覆盖回旧值 —— 状态栏随即钉死在与当前
+     登录态相反的结论上（且不会自愈）。每次登录态变化都递增 acctSeq，旧回包丢弃。 */
+  var acctSeq = 0;
+  function fetchAcctState() {
+    var seq = ++acctSeq;
+    NeteaseBridge.account().then(function (a) {
+      if (seq !== acctSeq) return;
+      S.acct = a; renderStatus();
+    }, function () {});
+    NeteaseBridge.vipInfo().then(function (v) {
+      if (seq !== acctSeq) return;
+      S.vip = v; renderStatus();
+    }, function () {});
   }
 
   function renderStatus() {
@@ -136,7 +150,8 @@
     } else if (S.vip && S.vip.error) who = '已登录（会员状态未知）';
     else who = '已登录（非会员）';
 
-    setStatus('内置桥接就绪 · ' + who + ' · 当前音质 ' + (LEVEL_LABEL[S.quality] || S.quality) +
+    setStatus('内置桥接就绪 · ' + who + ' · 下载音质 ' + (LEVEL_LABEL[S.quality] || S.quality) +
+              '、在线播放 ' + (LEVEL_LABEL[NeteaseBridge.streamQuality()] || NeteaseBridge.streamQuality()) +
               ' · 歌词服务可用' + tail,
               dead ? 'err' : (S.hasCookie ? 'ok' : 'warn'));
   }
@@ -388,17 +403,25 @@
     updateToolbar();
 
     var usedLabel = '';
+    var anonNote = '';
+    var skippedN = 0;   // 解析被跳过的首数：成功 toast 报实际追加数，不虚报
     setStatus('正在解析 ' + tracks.length + ' 首曲目的音源…');
 
-    NeteaseBridge.resolveMany(tracks, S.quality).then(function (r) {
+    NeteaseBridge.resolveMany(tracks, NeteaseBridge.streamQuality(), { forStream: true }).then(function (r) {
       usedLabel = (r && r.usedLabel) || '';
+      anonNote = (r && r.note) || '';
+      if (anonNote) {
+        // 登录态拿不到、匿名补上了：说清楚，别让人以为是音质降级或巧合
+        toast('已自动改用匿名音源', anonNote);
+      }
       if (r && r.skipped && r.skipped.length) {
+        skippedN = r.skipped.length;
         toast('跳过 ' + r.skipped.length + ' 首', r.skipped.join('、'), 'error');
       }
       if (!r || !r.ok || !r.urls.length) {
         throw new Error((r && r.error) || '这批曲目都没有可用音源');
       }
-      setStatus('解析完成（' + (usedLabel || '?') + '），正在写入歌单…');
+      setStatus('解析完成（' + (usedLabel || '?') + (anonNote ? ' · 部分改用匿名音源' : '') + '），正在写入歌单…');
       return ensurePlaylist(NE_PLAYLIST).then(function (idx) {
         if (idx == null || idx < 0) throw new Error('无法创建播放列表');
         // 追加而不是整单替换：之前播的歌原地保留。
@@ -422,7 +445,7 @@
       });
     }).then(function () {
       setStatus('已追加到 ' + NE_PLAYLIST + ' 并开播' + (usedLabel ? ' · ' + usedLabel : ''), 'ok');
-      toast('开始播放', NE_PLAYLIST + ' · 追加 ' + tracks.length + ' 首' +
+      toast('开始播放', NE_PLAYLIST + ' · 追加 ' + (tracks.length - skippedN) + ' 首' +
             (usedLabel ? ' · ' + usedLabel : ''), 'success');
       dedupePlaylists(NE_PLAYLIST);
     }).catch(function (e) {
@@ -466,11 +489,19 @@
     if (S.dlRun) { S.dlCancel = true; setStatus('已请求停止：当前这首下完就停…'); return; }
     if (S.busy || S.impRun) { toast('正在处理上一批', '稍等一下再点', 'error'); return; }
     S.busy = true;
+    // 与另外两页一致：解析阶段也把按钮切成「停止」，并按停止就真的不下
+    // （runDownloads 不再清 dlCancel，所以这里必须自己清，否则上次的停止会留到这一轮）
+    S.dlRun = true;
+    S.dlCancel = false;
+    S.dlDone = 0;
+    S.dlTotal = 0;
     updateToolbar();
     setStatus('正在解析 ' + tracks.length + ' 首（' + (LEVEL_LABEL[S.quality] || S.quality) + '）…');
 
     NeteaseBridge.resolveMany(tracks, S.quality).then(function (r) {
       S.busy = false;
+      if (S.dlCancel) { S.dlRun = false; updateToolbar(); setStatus('已停止（解析完成，未开始下载）', 'warn'); return; }
+      if (r && r.note) toast('已自动改用匿名音源', r.note);
       if (r && r.skipped && r.skipped.length) {
         toast('跳过 ' + r.skipped.length + ' 首', r.skipped.join('、'), 'error');
       }
@@ -480,6 +511,7 @@
       return runDownloads(buildPlan(r.resolves, tracks));
     }).catch(function (e) {
       S.busy = false;
+      S.dlRun = false;
       setStatus('解析失败：' + (e && e.message || e), 'err');
       toast('解析失败', String(e && e.message || e), 'error');
       updateToolbar();
@@ -522,11 +554,14 @@
       var clipped = tracks.slice(0, IMPORT_MAX);
       var over = tracks.length - clipped.length;
       setStatus('「' + pl.name + '」共 ' + tracks.length + ' 首，正在解析音源（' +
-                clipped.length + ' 首，音质 ' + (LEVEL_LABEL[S.quality] || S.quality) + '）…');
+                clipped.length + ' 首，在线播放固定 ' +
+                (LEVEL_LABEL[NeteaseBridge.streamQuality()] || NeteaseBridge.streamQuality()) + '）…');
 
       // 批量解析：网易云一次请求能出 10 首，比逐首搜索快得多
+      // 注意用 streamQuality()：导入的曲目是要**播放**的，不能拿无损 FLAC 直链
+      // 交给宿主（CDN 的 Content-Type 不对，foobar 会报"不支持的格式或文件损坏"）
       var urls = [], failed = [];
-      return NeteaseBridge.resolveMany(clipped, S.quality).then(function (r) {
+      return NeteaseBridge.resolveMany(clipped, NeteaseBridge.streamQuality(), { forStream: true }).then(function (r) {
         if (r.resolves && r.resolves.length) {
           r.resolves.forEach(function (rv) {
             urls.push(rv.url);
@@ -560,6 +595,8 @@
                         failed.length ? 'warn' : 'ok');
               toast('导入完成', name + ' · ' + urls.length + ' 首' +
                     (failed.length ? '（' + failed.length + ' 首未导入）' : ''), 'success');
+              // 与 QQ 导入同口径：顺手清掉同名空壳歌单（getAll 抖动攒下的）
+              dedupePlaylists(name);
             });
         });
       });
@@ -581,8 +618,10 @@
   function verifyLogin() {
     S.hasCookie = NeteaseBridge.hasLogin();
     S.vip = null;
+    var seq = ++acctSeq;   // 连续保存两次 Cookie：上一次校验的慢回包不许覆盖这次
     setStatus('正在校验登录状态…');
     NeteaseBridge.account().then(function (a) {
+      if (seq !== acctSeq) return;
       S.acct = a;
       if (!a || !a.ok) {
         // 分清"Cookie 不认"和"接口没问成"：account() 把网络失败也归成 !ok，
@@ -597,6 +636,7 @@
         return;
       }
       return NeteaseBridge.vipInfo().then(function (v) {
+        if (seq !== acctSeq) return;
         S.vip = v;
         var name = a.nickname ? '「' + a.nickname + '」' : '';
         if (v && v.vip) {
@@ -640,6 +680,7 @@
   function clearCookieFromPanel() {
     if (!window.NeteaseBridge) return;
     NeteaseBridge.clearCookie();
+    acctSeq++;               // 在途的登录校验回包一律作废，别覆盖"已清除"的状态
     S.hasCookie = false;
     S.vip = null;
     S.acct = null;

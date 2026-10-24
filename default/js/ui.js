@@ -43,6 +43,20 @@
   CM.trackPaths = function(tracks) {
     return tracks.map(function(t) { return CM.trackPath(t); }).filter(Boolean);
   };
+  /* 曲目列表 → { paths, sourceIndex }：paths 只含有效路径，sourceIndex[k] 是
+     paths[k] 在**原始列表**里的下标。视图里的 data-i 一律是原始下标，而上下文
+     歌单只收有效路径 —— 不做这层映射的话，列表里只要有一项没有路径，它后面
+     所有行都会整体错位（表现：点这首播那首 / 双击播到下一行）。 */
+  CM.trackPathPlan = function(tracks) {
+    var paths = [], sourceIndex = [];
+    (tracks || []).forEach(function(t, i) {
+      var p = CM.trackPath(t);
+      if (!p) return;
+      paths.push(p);
+      sourceIndex.push(i);
+    });
+    return { paths: paths, sourceIndex: sourceIndex };
+  };
   // 从 API 响应中提取曲目数组（兼容 tracks/items 两种字段名）
   CM.respTracks = function(r) {
     return (r && (r.tracks || r.items)) || [];
@@ -58,7 +72,7 @@
   CM.playAllTracks = function(tracks, title, onDone) {
     var paths = CM.trackPaths(tracks);
     if (!paths.length) { CM.showToast('无法播放', '未找到有效文件路径', 'error'); if (onDone) onDone(false); return; }
-    CM.playContextList(tracks, 0, title, {
+    CM.playContextList(tracks, null, title, {
       onDone: function(ok) {
         if (ok && !onDone) CM.showToast('开始播放', (title || '全部') + ' · ' + paths.length + ' 首', 'success');
         if (onDone) onDone(ok);
@@ -363,7 +377,7 @@
   /* ============================================
    * Tab 切换
    * ============================================ */
-  var TAB_IDS = { discover: 'tabDiscover', playlist: 'tabPlaylist', library: 'tabLibrary', search: 'tabSearch', qqmusic: 'tabQqmusic', netease: 'tabNetease', settings: 'tabSettings' };
+  var TAB_IDS = { discover: 'tabDiscover', playlist: 'tabPlaylist', library: 'tabLibrary', search: 'tabSearch', qqmusic: 'tabQqmusic', netease: 'tabNetease', bilibili: 'tabBilibili', settings: 'tabSettings' };
   // 缓存 Tab 相关 DOM（静态元素，无需每次 switchTab 都查询）
   var _tabNavItems, _tabMainTabs, _tabContents;
   CM.switchTab = function(tab) {
@@ -500,7 +514,8 @@
     });
   };
 
-  // 更新“喜欢”按钮（rating >= 4 视为喜欢）
+  // 更新“喜欢”按钮（5 星 = 喜欢，与 CM.setRating / 「我喜欢的音乐」同一口径；
+  // 旧实现把 4 星也算喜欢，于是 4 星时心形是亮的、那首歌却不在歌单里）
   CM._ratingLoadId = 0;
   CM.refreshLikeState = function() {
     var path = CM.trackPath(CM.currentTrack);
@@ -509,7 +524,7 @@
     CM.api('rating.get', { path: path }).then(function(r) {
       if (loadId !== CM._ratingLoadId) return;
       var rt = r && r.success !== false ? (r.rating || 0) : 0;
-      els.likeBtn.classList.toggle('liked', rt >= 4);
+      els.likeBtn.classList.toggle('liked', rt >= 5);
     });
   };
 
@@ -541,13 +556,21 @@
       else { el.style.backgroundImage = 'url("' + url + '")'; el.innerHTML = ''; }
     }
     var reqs = [];
+    // 并发上限 2 批：每批 50 条、宿主每条都要扫一次目录，一页 300/500 首时同时甩
+    // 10 批过去会把宿主 UI 线程压住（页尺寸调大后最容易复现的"卡"就是这个）。
+    var jobs = [];
     for (var start = 0; start < pendPaths.length; start += CHUNK) {
-      (function(chunkSlots, chunkPaths) {
-        reqs.push(CM.api('artwork.getFb2kUrlByPathBatch', { paths: chunkPaths, type: 'front', maxSize: maxSize || 160 }).then(function(r) {
-          if (r && r.artworks) r.artworks.forEach(function(entry, i) { fillOne(chunkSlots[i], entry); });
-        }));
-      })(pendSlots.slice(start, start + CHUNK), pendPaths.slice(start, start + CHUNK));
+      jobs.push({ slots: pendSlots.slice(start, start + CHUNK), paths: pendPaths.slice(start, start + CHUNK) });
     }
+    var nextJob = 0;
+    function runJob() {
+      if (nextJob >= jobs.length) return Promise.resolve();
+      var job = jobs[nextJob++];
+      return CM.api('artwork.getFb2kUrlByPathBatch', { paths: job.paths, type: 'front', maxSize: maxSize || 160 }).then(function(r) {
+        if (r && r.artworks) r.artworks.forEach(function(entry, i) { fillOne(job.slots[i], entry); });
+      }).then(runJob, runJob);
+    }
+    for (var w = 0; w < Math.min(2, jobs.length); w++) reqs.push(runJob());
     return Promise.all(reqs);
   };
 
@@ -609,6 +632,17 @@
       var el = e.target.closest('.dc-track[data-path], .search-result-item[data-path]');
       if (!el) return;
       CM.playRow(rowPlayCtx(el));
+    });
+    /* 在线曲目：鼠标一按下就开始重解析直链 —— 双击的两次按下之间足够一个往返，
+       等 dblclick 才解析就要多等一次网才出声（过期地址的真实痛点在"等"）。
+       已新鲜的直链在这里直接返回，不发请求（见 playback-model.js 的 pathFreshness）。 */
+    els.mainContent.addEventListener('mousedown', function(e) {
+      if (e.button !== 0) return;
+      var el = e.target.closest('.dc-track[data-path], .search-result-item[data-path]');
+      if (!el || !CM.prefetchOnlinePath) return;
+      var ctx = rowPlayCtx(el);
+      var raw = ctx.tracks ? CM.trackPath(ctx.tracks[ctx.index]) : ctx.path;
+      if (raw) CM.prefetchOnlinePath(raw);
     });
     els.mainContent.addEventListener('contextmenu', function(e) {
       var el = e.target.closest('.dc-track[data-path], .search-result-item[data-path]');

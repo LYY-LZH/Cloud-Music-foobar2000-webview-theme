@@ -112,7 +112,7 @@ window.addEventListener('unhandledrejection', function (e) {
            表头点击 / 回车 / 空格展开收起，状态记忆在 settings；
            切到 qqmusic / netease（含顶部 main-tabs）时自动展开。 -->
       <div class="nav-group" id="navOnlineGroup" tabindex="0" role="button" aria-expanded="false"
-           title="展开 / 收起在线音源页（QQ 音乐 · 网易云）">
+           title="展开 / 收起在线音源页（QQ 音乐 · 网易云 · Bilibili）">
         <svg viewBox="0 0 24 24"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
         <span>在线音源</span>
         <svg class="nav-group-chevron" viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"/></svg>
@@ -125,6 +125,10 @@ window.addEventListener('unhandledrejection', function (e) {
         <div class="nav-item nav-sub-item" data-tab="netease" tabindex="0" title="网易云音乐在线音源">
           <svg viewBox="0 0 24 24"><path d="M17.5 18H7a4.5 4.5 0 0 1-.7-8.95 5.5 5.5 0 0 1 10.6 1.3A3.8 3.8 0 0 1 17.5 18z"/></svg>
           <span>网易云</span>
+        </div>
+        <div class="nav-item nav-sub-item" data-tab="bilibili" tabindex="0" title="Bilibili 在线音源（视频音轨）">
+          <svg viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="3"/><polyline points="7 3 12 7 17 3"/><polygon points="10 11 15 13.5 10 16 10 11"/></svg>
+          <span>Bilibili</span>
         </div>
       </div>
     </div>
@@ -155,6 +159,7 @@ window.addEventListener('unhandledrejection', function (e) {
       <div class="main-tab" data-tab="search">搜索</div>
       <div class="main-tab" data-tab="qqmusic">QQ 音乐</div>
       <div class="main-tab" data-tab="netease">网易云</div>
+      <div class="main-tab" data-tab="bilibili">Bilibili</div>
     </div>
     <div class="main-body" id="mainBody">
 
@@ -350,7 +355,7 @@ window.addEventListener('unhandledrejection', function (e) {
               <svg viewBox="0 0 24 24" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
               <input type="text" id="qqmInput" placeholder="搜索 QQ 音乐：歌名 / 歌手 / 专辑，回车搜索" spellcheck="false" />
             </div>
-            <select class="qqm-select" id="qqmQuality" title="下载音质（母带 / Hi-Res / 无损需要超级会员登录）。在线播放固定使用 MP3：无损直链会被 CDN 的 audio/x-ogg 类型干扰、foobar 无法流播，无损请用下载落盘">
+            <select class="qqm-select" id="qqmQuality" title="下载音质（母带 / Hi-Res / 无损需要超级会员登录）。在线播放固定使用 MP3：未登录拿不到无损直链，登录态无损直链的 Content-Type 已实测错标为 audio/x-ogg（foobar 会拒解），无损请用下载落盘">
               <option value="master">臻品母带</option>
               <option value="hires">Hi-Res 24bit</option>
               <option value="flac">SQ 无损 FLAC</option>
@@ -367,7 +372,7 @@ window.addEventListener('unhandledrejection', function (e) {
             <span class="qqm-count" id="qqmCount">已选 0 首</span>
             <span class="qqm-flex"></span>
             <button class="qqm-btn" id="qqmDownloadBtn" disabled title="解析音源并下载到 &lt;配置目录&gt;\QQ音乐下载（含同名歌词 .lrc；下载中再点一次 = 停止）">
-              <svg viewBox="0 0 24 24"><path d="M12 15V3m0 12l-4-4m4 4l4-4"/><path d="M2 17l.621 2.485A2 2 0 0 0 4.561 21h14.878a2 2 0 0 0 1.94-1.515L22 17"/></svg>
+              <svg viewBox="0 0 24 24"><path d="M11 2h2v9.17l3.59-3.58L18 9l-6 6-6-6 1.41-1.41L11 11.17z"/><rect x="4" y="18" width="16" height="2" rx="1"/></svg>
               <span>下载选中</span>
             </button>
             <button class="qqm-btn qqm-btn-primary" id="qqmPlayBtn" disabled>
@@ -473,7 +478,7 @@ window.addEventListener('unhandledrejection', function (e) {
               <svg viewBox="0 0 24 24" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
               <input type="text" id="nemInput" placeholder="搜索网易云音乐：歌名 / 歌手 / 专辑，回车搜索" spellcheck="false" />
             </div>
-            <select class="nem-select" id="nemQuality" title="音质同时作用于在线播放与下载。网易云的 FLAC 直链内容类型正确、foobar 能直接流播，无损不必下载后再听；无损与 Hi-Res 需要会员登录">
+            <select class="nem-select" id="nemQuality" title="音质同时作用于在线播放与下载。无损 FLAC / Hi-Res 在线流播会自动整理成可流播直链（https + 探测过的镜像），整理不出自动回落 320K MP3；无损与 Hi-Res 需要会员登录">
               <option value="standard">标准 128K</option>
               <option value="higher">较高 192K</option>
               <option value="exhigh">极高 320K</option>
@@ -488,7 +493,7 @@ window.addEventListener('unhandledrejection', function (e) {
             <span class="nem-count" id="nemCount">已选 0 首</span>
             <span class="nem-flex"></span>
             <button class="nem-btn" id="nemDownloadBtn" disabled title="解析音源并下载到 &lt;配置目录&gt;\网易云音乐下载（含同名歌词 .lrc；下载中再点一次 = 停止）">
-              <svg viewBox="0 0 24 24"><path d="M12 15V3m0 12l-4-4m4 4l4-4"/><path d="M2 17l.621 2.485A2 2 0 0 0 4.561 21h14.878a2 2 0 0 0 1.94-1.515L22 17"/></svg>
+              <svg viewBox="0 0 24 24"><path d="M11 2h2v9.17l3.59-3.58L18 9l-6 6-6-6 1.41-1.41L11 11.17z"/><rect x="4" y="18" width="16" height="2" rx="1"/></svg>
               <span>下载选中</span>
             </button>
             <button class="nem-btn nem-btn-primary" id="nemPlayBtn" disabled>
@@ -516,6 +521,78 @@ window.addEventListener('unhandledrejection', function (e) {
                      spellcheck="false" title="输入页码后回车即可跳转" />
               页
               <button class="nem-btn nem-btn-sm" id="nemGoBtn">跳转</button>
+            </span>
+          </div>
+        </div>
+      </div>
+      <!-- Bilibili 在线音源（扩展页，逻辑在 js/ui-bilibili.js + js/bilibili-core.js）
+           取到的是 html5 档 MP4（内含 AAC 音轨），免 Referer 可直接流播；
+           音质约 157kbps，会员高清档与 DASH 音轨都需要自定义 Referer，宿主做不到。 -->
+      <div class="tab-content" id="tabBilibili">
+        <div class="bl-root">
+          <div class="bl-head">
+            <div>
+              <div class="bl-title">Bilibili 在线音源</div>
+              <div class="bl-sub" id="blStatus">正在初始化页内桥接…</div>
+            </div>
+          </div>
+
+          <div class="bl-bar">
+            <div class="bl-search">
+              <svg viewBox="0 0 24 24" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <input type="text" id="blInput" placeholder="搜索 Bilibili 视频：歌名 / 歌手 / 现场，回车搜索" spellcheck="false" />
+            </div>
+            <button class="bl-btn bl-btn-primary" id="blSearchBtn">搜索</button>
+          </div>
+
+          <div class="bl-bar">
+            <div class="bl-search">
+              <svg viewBox="0 0 24 24" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5"/></svg>
+              <input type="text" id="blUrlInput" placeholder="粘贴 Bilibili 视频链接 / BV 号 / av 号，直接播这个视频（多 P 视频用 ?p=N 指定分 P）" spellcheck="false" />
+            </div>
+            <button class="bl-btn" id="blUrlBtn" title="支持视频页链接、BV 号与 av 号（av 号同样走 wbi/view 查详情）">播放链接</button>
+          </div>
+
+          <div class="bl-toolbar">
+            <label class="bl-check"><input type="checkbox" id="blAll" title="勾选当前这一页的全部视频" /> 全选本页</label>
+            <span class="bl-count" id="blCount">已选 0 个</span>
+            <span class="bl-flex"></span>
+            <button class="bl-btn" id="blDownloadBtn" disabled title="解析音源并下载到 &lt;配置目录&gt;\B站音乐下载（MP4 容器，含同名歌词 .lrc；下载中再点一次 = 停止）">
+              <svg viewBox="0 0 24 24"><path d="M11 2h2v9.17l3.59-3.58L18 9l-6 6-6-6 1.41-1.41L11 11.17z"/><rect x="4" y="18" width="16" height="2" rx="1"/></svg>
+              <span>下载选中</span>
+            </button>
+            <button class="bl-btn bl-btn-primary" id="blPlayBtn" disabled>
+              <svg viewBox="0 0 24 24"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+              <span>在 foobar2000 播放</span>
+            </button>
+          </div>
+
+          <!-- 下载保存位置条（首轮下载后出现） -->
+          <div class="bl-dlrow" id="blDlRow" hidden>
+            <span class="bl-dl-label">下载保存到</span>
+            <code class="bl-dl-path" id="blDlPath"></code>
+            <button class="bl-btn bl-btn-sm" id="blDlOpen" title="在资源管理器中打开该目录">打开文件夹</button>
+            <button class="bl-btn bl-btn-sm" id="blDlCopy" title="复制保存路径">复制路径</button>
+          </div>
+
+          <div class="bl-list" id="blList">
+            <div class="empty-illustration">
+              <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              <span>输入关键词搜 Bilibili 视频，或在下面粘贴链接 —— 勾选后追加到「B站音乐」歌单播放</span>
+            </div>
+          </div>
+
+          <div class="bl-pager" id="blPager">
+            <button class="bl-btn bl-btn-sm" id="blPrevBtn" title="上一页">‹ 上一页</button>
+            <span class="bl-page-info">第 <b id="blPageNo">1</b> 页</span>
+            <button class="bl-btn bl-btn-sm" id="blNextBtn" title="下一页">下一页 ›</button>
+            <span class="bl-flex"></span>
+            <span class="bl-jump">
+              跳至
+              <input type="text" id="blPageInput" inputmode="numeric" autocomplete="off"
+                     spellcheck="false" title="输入页码后回车即可跳转" />
+              页
+              <button class="bl-btn bl-btn-sm" id="blGoBtn">跳转</button>
             </span>
           </div>
         </div>
@@ -810,29 +887,31 @@ window.addEventListener('unhandledrejection', function (e) {
 <script src="sdk/smp-compat.global.js?v=2000"></script>
 -->
 <script src="sdk/bridge.global.js?v=2000"></script>
-<!-- CloudMusic Theme v3.0.0 -->
-<script src="js/core.js?v=317"></script>
+<!-- CloudMusic Theme v3.0.1 -->
+<script src="js/core.js?v=318"></script>
 <script src="js/lyric-core.js?v=305"></script>
-<script src="js/playback-model.js?v=4"></script>
-<script src="js/ui.js?v=311"></script>
+<script src="js/playback-model.js?v=11"></script>
+<script src="js/ui.js?v=314"></script>
 <script src="js/ui-lyrics.js?v=318"></script>
-<script src="js/ui-playlist.js?v=315"></script>
+<script src="js/ui-playlist.js?v=319"></script>
 <script src="js/ui-discover.js?v=305"></script>
-<script src="js/ui-library.js?v=306"></script>
+<script src="js/ui-library.js?v=310"></script>
 <script src="js/ui-queue.js?v=309"></script>
 <script src="js/ui-nowplaying.js?v=311"></script>
 <script src="js/ui-tags.js?v=305"></script>
 <script src="js/audio-viz.js?v=308"></script>
-<script src="js/controls.js?v=323"></script>
-<script src="js/online-common.js?v=306"></script>
-<script src="js/qqmusic-core.js?v=305"></script>
+<script src="js/controls.js?v=328"></script>
+<script src="js/online-common.js?v=309"></script>
+<script src="js/qqmusic-core.js?v=310"></script>
 <script src="js/qq-playlist-export.js?v=304"></script>
-<script src="js/ui-qqmusic.js?v=307"></script>
-<script src="js/netease-core.js?v=305"></script>
-<script src="js/ui-netease.js?v=307"></script>
+<script src="js/ui-qqmusic.js?v=308"></script>
+<script src="js/netease-core.js?v=315"></script>
+<script src="js/ui-netease.js?v=314"></script>
+<script src="js/bilibili-core.js?v=6"></script>
+<script src="js/ui-bilibili.js?v=6"></script>
 <script src="js/lyrics-sources.js?v=2"></script>
-<script src="js/lyrics-resolver.js?v=307"></script>
-<script src="js/artwork-resolver.js?v=304"></script>
+<script src="js/lyrics-resolver.js?v=308"></script>
+<script src="js/artwork-resolver.js?v=305"></script>
 <script src="js/tray.js?v=4"></script>
 <script src="js/ui-settings.js?v=6"></script>
 <script src="js/app.js?v=315"></script>

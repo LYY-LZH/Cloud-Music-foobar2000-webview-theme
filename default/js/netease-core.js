@@ -34,11 +34,13 @@
  *          无防盗链（无 Referer / 任意 Referer 都 200），param 把原图 5MB
  *          压到 328KB，可以直接给 <img>。
  *
- * 为什么网易云可以**在线无损**而 QQ 不行：
- *   实测网易云 FLAC 直链的 Content-Type 是 application/octet-stream
- *   （MP3 是 audio/mpeg），foobar 按内容嗅探就能正确识别；QQ 给所有直链打
- *   audio/x-ogg，FLAC/AAC 会被误当 Ogg 拒解。所以这里播放不再限制 MP3 ——
- *   无损 / Hi-Res 直接流播，音质下拉框同时管播放与下载。
+ * 为什么无损能在线流播了（2026-10-24 定位到真凶，详见 streamQuality 注释）：
+ *   「foobar 按响应头 Content-Type 选解码器」只对了一半——audio/mpeg 标错
+ *   会让 FLAC 打不开；但换对 mime 也不够，**http 明文**的 FLAC 在 foobar 里
+ *   停滞在 ~0.5 秒（本机 HTTP 服务器发同一份字节却完美流播）。**换 https 后
+ *   完全正常**（时长 / 实时进度 / seek 实测 3 分多钟精确实时）。所以无损直链
+ *   交给宿主前经 streamifyUrl 整理成「https + 非 audio/mpeg 镜像」（探测把关），
+ *   过不了关回落 320K MP3。音质下拉框同时作用于在线播放与下载。
  *
  * 链接过期：网易云 CDN **不校验查询串签名**（实测把 vuutv / authSecret 删掉
  *   或改成假值都照常 206），接口里的 expi=1200 只是建议缓存时长。稳妥起见仍按
@@ -151,15 +153,20 @@
      「Copy as cURL」出来的一整条命令（-H 'cookie: …'），
      还接受从 DevTools 应用面板里整行复制的 "Cookie: xxx"。 */
   function parseCookieInput(raw) {
-    var s = String(raw || '');
+    /* Windows cmd 的 curl 会写成 `-b ^"NMTID=…^"`（每个引号前一个 ^），
+       先把 caret 全部去掉，否则第一个键会变成 `^"NMTID`、整条被当成解析失败。
+       （PowerShell / bash 的 `Copy as cURL` 没有这层转义，去掉也不影响。） */
+    var s = String(raw || '').replace(/\^/g, '');
     var m = /cookie\s*:\s*([^'"]+)/i.exec(s);
     if (m) s = m[1];
     var out = [], seen = {};
     s.split(/[;\n\r]+/).forEach(function (part) {
       var i = part.indexOf('=');
       if (i <= 0) return;
-      var k = part.slice(0, i).trim().replace(/^-\S*\s*/, '');
-      var v = part.slice(i + 1).trim();
+      // 键前面可能还挂着整条 curl（`curl 'url' -b 'MUSIC_U=…`）/ 引号 / caret 残留：
+      // 取最后一个由空白或引号分隔的片段就是 Cookie 名
+      var k = part.slice(0, i).trim().split(/[\s'"]+/).pop().replace(/^[^A-Za-z0-9_]+/, '');
+      var v = part.slice(i + 1).trim().replace(/^["']+|["']+$/g, '');
       if (!/^[A-Za-z0-9_]+$/.test(k) || !v) return;
       if (!KEEP_COOKIE[k] || seen[k]) return;
       seen[k] = 1;
@@ -216,6 +223,140 @@
   function getQuality() { return normQuality(lsGet(LS_QUALITY) || 'lossless'); }
   function setQuality(q) { lsSet(LS_QUALITY, normQuality(q)); return getQuality(); }
 
+  /* streamQuality() —— 在线**播放**用的档位（下载用用户选的档位，见 ui-netease）
+     ------------------------------------------------------------
+     演进史（都是实测，别再走回头路）：
+     · 2026-10-23 第 15 轮：登录后无损直链能拿到，但 foobar 播不了 → 第 12 轮
+       曾把播放封顶 320K（streamQuality 把 lossless/hires 压成 exhigh）。
+       当时把原因记成「FLAC 直链被标成 audio/mpeg，foobar 按类型选解码器拒解」。
+     · 2026-10-24 第 21 轮（会员账号 + MCP 直控 foobar 逐项 A/B）定位到**真凶**：
+       - 「标错类型拒解」只对了一半：audio/mpeg 确实会让 foobar 选错解码器；
+         但把 mime 换对（octet-stream）也**不够**——http 明文的 FLAC 照样停滞
+         在 ~0.5 秒（curl 同 URL 全速 10MB/s；本机 HTTP 服务器发同一份字节、
+         同样的 mime 却完美流播）。foobar 的**明文 HTTP 读取路径**与网易云 CDN
+         在 FLAC 上的服务行为不兼容。
+       - **https 完全正常**：同一条直链把 `http://` 换成 `https://`，时长、
+         实时进度、seek 全部正常（实测连续 3 分多钟精确实时）。以前所有轮次
+         测的都是网易云 API 返回的 http 直链，从未试过换协议交付。
+       - 网易云各镜像对 Content-Type 的标注不一致（第 15 轮只测到 m701/m801）：
+         m701/m801 标 audio/mpeg，m704/m804 标 application/octet-stream。
+     · 结论：无损流播 = https + 非 audio/mpeg 的镜像（streamifyUrl 探测把关，
+       过不了关回落 320K）。本函数恢复为「跟随用户档位」。 */
+  function streamQuality() {
+    return getQuality();
+  }
+
+  /* 这条直链能不能直接交给宿主**流播**：只有**旧形态**（http 明文）的 FLAC
+     直链不能（实测停滞，见 streamifyUrl 的注释）。老歌单里的 FLAC 行靠这个
+     判定在播放前经 refreshUrl 重解析成 https 可流播直链；https 形态本身就能
+     流（streamifyUrl 产出的一定是探测过的）。playback-model 的 pathFreshness
+     把 true 当成"已过期"触发重解析。 */
+  function needStreamRefetch(u) {
+    var raw = String(u || '');
+    var s = raw.split('?')[0].toLowerCase();
+    return (/\.flac$/.test(s)) && /^http:\/\//i.test(raw);
+  }
+
+  /* 诊断：宿主拿到这条直链时，服务器到底回了什么（DevTools 里可调）。
+     用法：NeteaseBridge.probeStream('http://…/xxx.flac?auth=…')
+     回 { status, contentType, acceptRanges, contentLength, firstBytes, isFlac }：
+     · isFlac=true 表示字节确实是 FLAC（开头 66 4c 61 43 = "fLaC"）；
+     · contentType 是服务器给 foobar 的格式提示 —— foobar 的 HTTP reader 主要
+       按它选解码器，标错就会出现"能播 FLAC 的播放器却报不支持的格式"。 */
+  function probeStream(u, ms) {
+    if (!/^https?:\/\//i.test(String(u || ''))) return Promise.reject(new Error('需要一个 http(s) 直链'));
+    return hostHttp({
+      url: u, responseType: 'binary', ms: ms || 15000, tag: 'probe',
+      headers: { Range: 'bytes=0-15' }
+    }).then(function (r) {
+      var b64 = (r && r.body) || '';
+      var bytes = [], hex = '';
+      try {
+        if (typeof atob === 'function') {
+          var bin = atob(b64);
+          for (var i = 0; i < Math.min(16, bin.length); i++) {
+            bytes.push(bin.charCodeAt(i));
+            hex += ('0' + bin.charCodeAt(i).toString(16)).slice(-2) + ' ';
+          }
+        }
+      } catch (e) {}
+      var hh = (r && r.headers) || {};
+      function h(name) { return hh[name] || hh[name.toLowerCase()] || ''; }
+      var info = {
+        status: (r && r.status) || 0,
+        contentType: h('Content-Type'),
+        acceptRanges: h('Accept-Ranges'),
+        contentLength: h('Content-Length'),
+        firstBytes: hex.trim(),
+        isFlac: bytes.length >= 4 && bytes[0] === 0x66 && bytes[1] === 0x4C && bytes[2] === 0x61 && bytes[3] === 0x43
+      };
+      try { console.log('[NeteaseBridge] probeStream', String(u).slice(0, 140), info); } catch (e) {}
+      return info;
+    });
+  }
+
+  /* 无损直链 → foobar **能流播**的形态；整理不出来返回 ''（调用方回落 320K）。
+     两道关（见 streamQuality 注释里的实测）：① 换 https（明文 http 的 FLAC
+     停滞）；② 镜像标的 Content-Type 不能是 audio/mpeg（foobar 会选错解码器）。
+     用 probeStream 探 16 字节把关，镜像不行就在已验证可用的镜像里换。 */
+  var STREAM_MIRRORS = ['m804', 'm704'];
+  function probeStreamable(u) {
+    return probeStream(u).then(function (p) {
+      if (!p || !(p.status === 200 || p.status === 206)) return false;
+      var ct = String(p.contentType || '').toLowerCase();
+      // octet-stream / audio/flac 都行——foobar 对非 audio/mpeg 的响应做内容嗅探，
+      // 实测都能认出 fLaC 并正常流播；唯独 audio/mpeg 会被派给 MP3 解码器
+      return ct.indexOf('audio/mpeg') < 0;
+    }, function () { return false; });
+  }
+  function streamifyUrl(url) {
+    var u = String(url || '');
+    if (!/\.flac(\?|$)/i.test(u)) return Promise.resolve(u);
+    var httpsU = u.replace(/^http:\/\//i, 'https://');
+    return probeStreamable(httpsU).then(function (ok) {
+      if (ok) return httpsU;
+      var host = (/\/\/([^/]+)\//.exec(u) || [])[1] || '';
+      var cands = STREAM_MIRRORS
+        .filter(function (m) { return host.indexOf(m) < 0; })
+        .map(function (m) { return httpsU.replace(/\/\/[^/]+\//, '//' + m + '.music.126.net/'); });
+      var chain = Promise.resolve('');
+      cands.forEach(function (cand) {
+        chain = chain.then(function (found) {
+          return found ? found : probeStreamable(cand).then(function (ok2) { return ok2 ? cand : ''; });
+        });
+      });
+      return chain;
+    });
+  }
+
+  /* 解析结果收尾：flac 直链整理成可流播形态；整理不出来且 forStream（在线播放）
+     时回落 320K MP3 —— 别把一首注定停滞的 FLAC 交给宿主（foobar 会停在
+     ~0.5 秒然后跳歌）。下载路径（forStream=false）整理不出也**保留 flac 原链**：
+     落盘走宿主 http.download，与流播无关，用户选的无损档必须如实给。 */
+  function downgrade320(id) {
+    function one(anonymous) {
+      return resolveChunk([id], 'exhigh', anonymous).then(function (list) {
+        var rv = (list || [])[0];
+        return (rv && rv.url && !rv.trial) ? rv : null;
+      });
+    }
+    return one(false).then(function (rv) {
+      return rv || (hasLogin() ? one(true) : Promise.resolve(null));
+    }, function () {
+      return hasLogin() ? one(true) : Promise.resolve(null);
+    });
+  }
+  function finishStreamRv(rv, forStream) {
+    if (!rv || !rv.url || !/\.flac(\?|$)/i.test(rv.url)) return Promise.resolve(rv);
+    return streamifyUrl(rv.url).then(function (u2) {
+      if (u2) { rv.url = u2; return rv; }
+      if (!forStream) return rv;
+      return downgrade320(rv.id).then(function (rv2) {
+        return rv2 || { id: rv.id, url: null, streamFail: true };
+      });
+    });
+  }
+
   /* ------------------------------------------------------------
    * 基础请求
    * ---------------------------------------------------------- */
@@ -226,7 +367,11 @@
     var headers = {
       'User-Agent': UA,
       Referer: SITE + '/',
-      Cookie: cookieHeader()
+      /* opt.anonymous：**故意不带登录 Cookie**（只留 appver/os）。
+         用于「登录态拿不到、匿名却能拿到」的兜底重试 —— 用户实测过：同一首
+         歌不登录能听，登录之后反而听不了（Cookie 失效 / 账号受限 / 服务端按
+         账号判定都会这样）。 */
+      Cookie: (opt && opt.anonymous) ? BASE_COOKIE : cookieHeader()
     };
     if (opt && opt.headers) {
       for (var k in opt.headers) {
@@ -458,10 +603,11 @@
   var RESOLVE_CHUNK = 10;      // 每个请求塞多少首（实测 20 首也没问题，留余量）
   var RESOLVE_PARALLEL = 3;    // 同时几个请求
 
-  function resolveChunk(ids, quality) {
+  function resolveChunk(ids, quality, anonymous) {
     var q = QUAL_INFO[normQuality(quality)];
     var url = '/api/song/enhance/player/url?ids=%5B' + ids.join(',') + '%5D&br=' + q.br;
-    return getJson(url, { ms: 20000, tag: 'url' }).then(function (j) {
+    return getJson(url, { ms: 20000, tag: anonymous ? 'url-anon' : 'url',
+                          anonymous: !!anonymous }).then(function (j) {
       if (j.code !== 200) throw new Error('直链接口返回 code=' + j.code);
       var by = {};
       (j.data || []).forEach(function (x) { if (x && x.id) by[x.id] = x; });
@@ -548,14 +694,17 @@
         if (Object.prototype.hasOwnProperty.call(map, k) && String(map[k].id) === m[1]) { hit = map[k]; break; }
       }
       return { id: Number(m[1]), picUrl: hit ? hit.picUrl : '', title: hit ? hit.title : '',
-               artist: hit ? hit.artist : '', album: hit ? hit.album : '', key: '' };
+               artist: hit ? hit.artist : '', album: hit ? hit.album : '',
+               ts: (hit && hit.ts) || 0, key: '' };
     }
     if (!/music\.126\.net|music\.163\.com/i.test(u)) return null;
     var key = md5OfUrl(u);
     var rec = key ? urlMetaMap()[key] : null;
     if (!rec) return null;
+    /* ts 一定要带出去：playback-model 的 pathFreshness 靠它判"这条还能用多久"，
+       漏了就等于每次重播都当成"判不出来"→ 白解析一次（实测过这个坑）。 */
     return { id: rec.id, picUrl: rec.picUrl, title: rec.title, artist: rec.artist,
-             album: rec.album, level: rec.level, key: key };
+             album: rec.album, level: rec.level, ts: rec.ts || 0, key: key };
   }
 
   /* 这个路径是不是网易云的在线曲目（按域名判断，不要求有映射记录） */
@@ -576,34 +725,81 @@
   /* ------------------------------------------------------------
    * 批量解析（勾选播放 / 下载共用）
    * ---------------------------------------------------------- */
-  function resolveMany(tracks, quality) {
+  function resolveMany(tracks, quality, opts) {
+    var forStream = !!(opts && opts.forStream);
     tracks = (tracks || []).filter(function (t) { return t && t.id; });
     if (!tracks.length) {
       return Promise.resolve({ ok: false, urls: [], resolves: [], skipped: [],
                                usedLabel: '', error: '没有可解析的曲目' });
     }
-    var ids = tracks.map(function (t) { return t.id; });
-    var chunks = [];
-    for (var i = 0; i < ids.length; i += RESOLVE_CHUNK) chunks.push(ids.slice(i, i + RESOLVE_CHUNK));
 
-    var out = new Array(ids.length);
-    var next = 0;
-    function worker() {
-      if (next >= chunks.length) return Promise.resolve();
-      var at = next++;
-      return resolveChunk(chunks[at], quality).then(function (list) {
-        var base = at * RESOLVE_CHUNK;
-        for (var k = 0; k < list.length; k++) out[base + k] = list[k];
-      }, function (e) {
-        // 某一批失败不该让整批报废：标记空结果，其它批照常
-        var base = at * RESOLVE_CHUNK;
-        for (var k = 0; k < (chunks[at] || []).length; k++) out[base + k] = { id: chunks[at][k], url: null, failed: true, error: e && e.message };
-      }).then(worker);
+    /* 一批 id → 结果数组（保序）。anonymous=true 时不带登录 Cookie。 */
+    function runChunks(idList, anonymous) {
+      var chunks = [];
+      for (var i = 0; i < idList.length; i += RESOLVE_CHUNK) chunks.push(idList.slice(i, i + RESOLVE_CHUNK));
+      var out = new Array(idList.length);
+      var next = 0;
+      function worker() {
+        if (next >= chunks.length) return Promise.resolve();
+        var at = next++;
+        return resolveChunk(chunks[at], quality, anonymous).then(function (list) {
+          var base = at * RESOLVE_CHUNK;
+          for (var k = 0; k < list.length; k++) out[base + k] = list[k];
+        }, function (e) {
+          // 某一批失败不该让整批报废：标记空结果，其它批照常
+          var base = at * RESOLVE_CHUNK;
+          for (var k = 0; k < (chunks[at] || []).length; k++) {
+            out[base + k] = { id: chunks[at][k], url: null, failed: true, error: e && e.message };
+          }
+        }).then(worker);
+      }
+      var runners = [];
+      for (var w = 0; w < Math.min(RESOLVE_PARALLEL, chunks.length); w++) runners.push(worker());
+      return Promise.all(runners).then(function () { return out; });
     }
-    var runners = [];
-    for (var w = 0; w < Math.min(RESOLVE_PARALLEL, chunks.length); w++) runners.push(worker());
 
-    return Promise.all(runners).then(function () {
+    return runChunks(tracks.map(function (t) { return t.id; }), false).then(function (out) {
+      /* 登录态的兜底：这批里"接口正常回了、但没给直链"的，用**匿名**再要一次。
+         用户实测过「不登录能听、登录之后反而不能听」—— 不重试的话，一个失效 /
+         受限的 Cookie 会把本来能播的免费曲目直接变成听不了。
+         只在登录态下、且只重试"首轮明确没给直链"的那些（网络失败的批不重试）。 */
+      var retry = [];
+      if (hasLogin()) {
+        for (var k = 0; k < out.length; k++) {
+          var rv = out[k];
+          /* 只兜**非会员**曲目：会员曲目拿不到是正常的（该账号没有授权），
+             不能靠匿名去绕开账号权限。 */
+          if (rv && !rv.url && !rv.trial && !rv.failed && !(tracks[k] && tracks[k].vip)) retry.push(k);
+        }
+      }
+      if (!retry.length) return { out: out, anonUsed: 0 };
+      return runChunks(retry.map(function (k) { return out[k].id; }), true).then(function (out2) {
+        var anonUsed = 0;
+        retry.forEach(function (k, j) {
+          var r2 = out2[j];
+          if (r2 && r2.url && !r2.trial) { out[k] = r2; anonUsed++; }
+        });
+        return { out: out, anonUsed: anonUsed };
+      });
+    }).then(function (res) {
+      /* 无损直链整理成可流播形态（https + 非 audio/mpeg 镜像；探测是小请求，
+         并发 3 与解析池同一量级）。放这一步：匿名兜底重试已经结束，整理的是
+         最终结果。下载路径不整理也不回落（forStream=false，见 finishStreamRv）。 */
+      var out0 = res.out || [];
+      var pi = 0;
+      function pworker() {
+        if (pi >= out0.length) return Promise.resolve();
+        var at = pi++;
+        return finishStreamRv(out0[at], forStream).then(function (rv2) {
+          out0[at] = rv2;
+        }, function () {}).then(pworker);
+      }
+      var prunners = [];
+      for (var pw = 0; pw < Math.min(3, out0.length); pw++) prunners.push(pworker());
+      return Promise.all(prunners).then(function () { return res; });
+    }).then(function (res) {
+      var out = res.out || [];
+      var anonUsed = res.anonUsed || 0;
       var urls = [], resolves = [], skipped = [], levels = {};
       var noLogin = !hasLogin();
       var netFail = 0, touched = false;
@@ -623,6 +819,10 @@
           // 混进「无版权 / 需会员」会让用户去登录一个根本没问题的账号
           netFail++;
           skipped.push(t.title + '（解析请求失败：' + (rv.error || '网络异常') + '）');
+        } else if (rv.streamFail) {
+          // 无损直链当前没有可流播的形态（https/镜像探测都不过），回落 320K
+          // 也没拿到——如实按"没有可用音源"说，别交给宿主一首会停滞的 FLAC
+          skipped.push(t.title + '（无损直链暂时不可流播，回落 320K 也未成功）');
         } else {
           skipped.push(t.title + '（' + (noLogin ? '未登录 / 无版权 / 需会员' : '无版权 / 需会员') + '）');
         }
@@ -640,22 +840,70 @@
         skipped: skipped,
         usedLabel: LEVEL_LABEL[best] || '',
         levels: levels,
+        // 登录态拿不到、匿名补上的数量（UI 用它提示一句"已改用匿名音源"）
+        anonFallback: anonUsed,
+        note: anonUsed ? ('登录 Cookie 拿不到 ' + anonUsed + ' 首，已自动改用匿名音源') : '',
         error: urls.length ? null
              : (netFail && netFail === tracks.length
                 ? '音源解析请求全部失败（网络或接口异常），请稍后重试'
                 : (noLogin ? '这批曲目都没有可用音源（会员曲目请先在右上角「设置 Cookie」登录）'
-                           : '这批曲目都没有可用音源'))
+                           : '这批曲目都没有可用音源（登录态和匿名都拿不到；Cookie 可能已失效，可试试点「清除 Cookie」）'))
       };
     });
   }
 
-  /* 单首解析（歌单导入 / 诊断用） */
-  function resolveStream(id, quality) {
-    return resolveChunk([id], quality).then(function (list) {
-      var rv = (list || [])[0];
-      if (!rv || !rv.url) throw new Error('拿不到直链（无版权 / 需要会员）');
-      if (rv.trial) throw new Error('只有 ' + (rv.trialEnd || 45) + ' 秒试听片段（需要会员）');
-      return rv;
+  /* 单首解析（播放前刷新 / 诊断用）。登录态拿不到时用匿名重试一次 —— 与批量同一套兜底。
+     forStream（默认 true）：flac 直链整理成可流播形态、整理不出回落 320K。 */
+  function resolveStream(id, quality, forStream) {
+    function one(anonymous) {
+      return resolveChunk([id], quality, anonymous).then(function (list) {
+        var rv = (list || [])[0];
+        if (!rv || !rv.url) throw new Error('拿不到直链（无版权 / 需要会员）');
+        if (rv.trial) throw new Error('只有 ' + (rv.trialEnd || 45) + ' 秒试听片段（需要会员）');
+        return rv;
+      });
+    }
+    return one(false).then(null, function (e) {
+      if (!hasLogin()) throw e;
+      return one(true).then(null, function () { throw e; });
+    }).then(function (rv) {
+      return finishStreamRv(rv, forStream !== false);
+    });
+  }
+
+  /* 播放前刷新直链：写进 foobar 歌单的是**带 CDN 签名和时效**的地址，过期后
+     宿主打不开就自动跳下一首 —— 用户看到的是"这首还没开始就自己跳走了"。
+     按直链反查出的歌曲 id 重新解析一次，并把新直链的映射记下来（歌名/封面要用）。 */
+  function refreshUrl(u) {
+    var meta = metaFromUrl(u);
+    if (!meta || !meta.id) {
+      // 映射丢了（超过 400 条被裁掉）：认不出是哪首，没法重新解析 —— 交给调用方
+      // 原样播，别因为"刷新不了"就拒绝一首可能还有效的直链
+      var e0 = new Error('这条直链反查不到歌曲 id');
+      e0.cmUnidentifiable = true;
+      return Promise.reject(e0);
+    }
+    function one(anonymous) {
+      return resolveChunk([meta.id], streamQuality(), anonymous).then(function (list) {
+        var rv = (list || [])[0];
+        if (!rv || !rv.url || rv.trial) throw new Error('重新解析拿不到直链（无版权 / 需要会员）');
+        return rv;
+      });
+    }
+    return one(false).then(null, function (e) {
+      if (!hasLogin()) throw e;
+      // 登录态拿不到 → 匿名再试一次（用户实测：不登录能听、登录反而不行）
+      return one(true).then(null, function () { throw e; });
+    }).then(function (rv) {
+      // 与 resolveStream 同一道收尾：flac 整理成 https 可流播形态（旧 http 形态
+      // 在 foobar 里停滞），整理不出回落 320K——刷新路径本身就是播放路径
+      return finishStreamRv(rv, true);
+    }).then(function (rv) {
+      if (!rv || !rv.url) throw new Error('重新解析拿不到可流播的直链');
+      rememberUrlMeta({ id: meta.id, picUrl: meta.picUrl || '', title: meta.title || '',
+                        artist: meta.artist || '', album: meta.album || '' }, rv);
+      persistUrlMeta();
+      return rv.url;
     });
   }
 
@@ -989,7 +1237,9 @@
       _selfcheck.steps.search = d && d.ok ? ('ok(' + (d.songs || []).length + ')') : ('fail:' + ((d && d.error) || '?'));
       probe = d && d.songs && d.songs[0];
       if (!probe) return null;
-      return resolveStream(probe.id, 'lossless').then(function (rv) {
+      // 自检只验证接口通不通：不走 streamify（无损探测/回落 320K 是播放路径的事，
+      // 塞进自检会让每次启动多发探测请求、失败时还多一次回落解析）
+      return resolveStream(probe.id, 'lossless', false).then(function (rv) {
         _selfcheck.steps.resolve = 'ok(' + (LEVEL_LABEL[rv.level] || rv.level || '?') + ')';
       }, function (e) {
         _selfcheck.steps.resolve = 'fail:' + ((e && e.message) || '?');
@@ -1053,11 +1303,17 @@
     version: VERSION,
     config: config,
     setQuality: setQuality, getQuality: getQuality,
+    // 在线播放用的档位（无损/Hi-Res 会降到 320K MP3，见 streamQuality 的注释）
+    streamQuality: streamQuality,
+    needStreamRefetch: needStreamRefetch,
+    probeStream: probeStream,
+    streamifyUrl: streamifyUrl,
     getCookie: getCookie, setCookie: setCookie, clearCookie: clearCookie,
     hasLogin: hasLogin,
     account: account, vipInfo: vipInfo,
     search: search,
     resolveStream: resolveStream,
+    refreshUrl: refreshUrl,
     resolveMany: resolveMany,
     lyric: lyric, lyricForTrack: lyricForTrack, lyricForId: lyricForId, lyricById: lyricById,
     lyricCacheClear: lyricCacheClear,
