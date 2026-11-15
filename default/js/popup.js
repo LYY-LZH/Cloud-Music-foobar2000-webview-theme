@@ -455,13 +455,31 @@
   // 托盘图标的兜底：主窗口藏到托盘后它那页可能已被宿主深挂起（JS 不跑），
   // 而小窗是可见的、事件循环照常 —— 单击 / 双击托盘由这里把主窗口叫回来。
   // 托盘事件宿主广播给所有窗口，所以两边都处理不会互相干扰。
+  // 例外：主窗口开启 2.1.0 的原生托盘左键（toggleMainWindow，经 cm:trayNative
+  // 共享键广而告之）后，宿主自己切换显隐 —— doubleClick 仍会广播到这里，若再
+  // focusMain 会把刚隐藏的主窗口又叫回来。读一次 + onChange 跟随，事件里复查。
+  var trayNativeToggle = false;
+  function syncTrayNative(v) { trayNativeToggle = !!(v && v.on); }
   function bindTrayFocus() {
     if (typeof fb.on !== 'function') return;
     fb.on('tray:click', function (e) {
+      if (trayNativeToggle) return;
       if (e && e.button !== undefined && e.button !== 0) return;
       focusMain();
     });
-    fb.on('tray:doubleClick', focusMain);
+    fb.on('tray:doubleClick', function () {
+      if (trayNativeToggle) return;
+      focusMain();
+    });
+    if (fb.sharedState && typeof fb.sharedState.get === 'function') {
+      // 回包契约（2.2.0 文档 + 实机 CDP 双证）：键命中时字段是 **exists**（无 found）。
+      // SDK JSDoc 写的 found 与实机不符 —— 第二十七轮照它把这里改成 r.found，
+      // 结果一次同步从未生效过；两个名字都认，跨宿主版本兜住
+      fb.sharedState.get('cm:trayNative').then(function (r) {
+        var present = r && (r.found !== undefined ? r.found : r.exists);
+        if (r && r.success !== false && present && r.value) syncTrayNative(r.value);
+      }, function () {});
+    }
   }
 
   /* ---------- 窗口几何：报给主窗口，按形态记 ---------- */
@@ -543,6 +561,7 @@
         renderList();
       }
       else if (data.key === 'cm:theme') applyTheme(data.value);
+      else if (data.key === 'cm:trayNative') syncTrayNative(data.value);
       else if (data.key === 'cm:art') {
         S.artInfo = data.value || {};
         // 主窗口送来的封面属于当前曲目才用（切歌与取图是两条异步路径）

@@ -298,6 +298,43 @@
     });
   };
 
+  // 打开 foobar 原生的自动播放列表编辑器。查询语句宿主不公开（getAutoplaylistQuery
+  // 恒回 null），"编辑条件"只能走原生编辑器。受理（accepted）≠ 已弹出：结果经
+  // playlist:autoplaylistUIResult 事件按 operationId 回 —— 失败（无编辑器/目标没了/
+  // 锁未验证）如实提示；监听带 60 秒兜底拆除，别把一次点击的监听挂一辈子。
+  CM.editAutoplaylist = function(pl) {
+    var target = pl && pl.guid ? { playlistGuid: pl.guid } : { playlist: pl.index };
+    var opId = null;
+    var onResult = function(e) {
+      if (!e || (opId && e.operationId !== opId)) return;
+      off();
+      if (e && e.success === false) {
+        CM.showToast('打不开自动列表编辑器', (e.reason ? e.reason + ' · ' : '') + (e.error || CM.errText(e.code)), 'error');
+      }
+    };
+    var off = function() { try { fb.off('playlist:autoplaylistUIResult', onResult); } catch (e) {} };
+    try { fb.on('playlist:autoplaylistUIResult', onResult); } catch (e) {}
+    setTimeout(off, 60000);
+    CM.apiOr('playlist.showAutoplaylistUI', target).then(function(r) {
+      opId = r && r.operationId;
+    }, function(e) {
+      off();
+      CM.failToast(e, '打不开自动列表编辑器');
+    });
+  };
+
+  // 光标跟随播放（设置页开关）：把可视表格滚动到正在播放那一行。
+  // 行标记由 refreshPlayingMarks 维护（_lastPlayingTr = 歌单表格行 / _lastPlayingDc =
+  // 视图行），offsetParent 为 null 的（隐藏 tab 里的）不滚。
+  CM.scrollToPlayingRow = function() {
+    var el = null;
+    if (CM._lastPlayingTr && CM._lastPlayingTr.offsetParent) el = CM._lastPlayingTr;
+    else if (CM._lastPlayingDc && CM._lastPlayingDc.offsetParent) el = CM._lastPlayingDc;
+    if (el && el.scrollIntoView) {
+      try { el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch (e) { el.scrollIntoView(); }
+    }
+  };
+
   CM.showPlaylistCtxMenu = function(x, y, idx) {
     var pl = (CM.playlists || []).find(function(p) { return p.index === idx; }) || {};
     // 自动歌单/锁定歌单（如默认「媒体库」）不接受手动编辑：隐藏 添加/重命名/清空/删除
@@ -308,6 +345,38 @@
         CM.playRow({ playlist: idx, index: 0 });
       } }
     ];
+    // 自动歌单：编辑仍只能走 foobar 原生编辑器（2.1.0 的 showAutoplaylistUI）；
+    // 2.2.0 起条件/排序能读了（实测 source:"sdk" 的列表可读到 query+sort）→
+    // 加一个只读查看入口，要改条件时复制出去对着改
+    if (pl.isAutoplaylist && CM.caps.has('playlist.getAutoplaylistQuery')) {
+      items.push({ label: '查看自动列表条件', icon: CM.icons.info, action: function() {
+        var qp = pl.guid ? { playlistGuid: pl.guid } : { playlist: pl.index };
+        CM.api('playlist.getAutoplaylistQuery', qp).then(function(r) {
+          if (!r || r.success === false || !r.isAutoplaylist || !r.query) {
+            CM.showToast('读不到该列表的条件', (r && r.note) || '它不是内置查询驱动的自动列表', 'error');
+            return;
+          }
+          CM.showCtxMenu(x, y, [
+            { isLabel: true, label: '「' + (pl.name || '') + '」的自动列表条件' },
+            { label: r.query, desc: '查询条件（点击复制）', action: function() {
+              CM.copyText(r.query).then(function(ok) { CM.showToast(ok ? '条件已复制' : '复制失败', null, ok ? 'success' : 'error'); });
+            } },
+            { label: r.sort || '（未设置）', desc: '排序' },
+            { label: r.keepSorted ? '是' : '否', desc: '保持排序' },
+            { divider: true },
+            { label: '复制全部', icon: CM.icons.copy, action: function() {
+              var text = '条件：' + r.query + '\n排序：' + (r.sort || '（未设置）') + '\n保持排序：' + (r.keepSorted ? '是' : '否');
+              CM.copyText(text).then(function(ok) { CM.showToast(ok ? '已复制' : '复制失败', null, ok ? 'success' : 'error'); });
+            } }
+          ]);
+        });
+      } });
+    }
+    if (pl.isAutoplaylist && CM.caps.has('playlist.showAutoplaylistUI')) {
+      items.push({ label: '编辑自动列表条件…', icon: CM.icons.edit, action: function() {
+        CM.editAutoplaylist(pl);
+      } });
+    }
     if (editable) {
       items.push({ isLabel: true, label: '添加到歌单' });
       items.push({ label: '添加本地文件', icon: CM.icons.folder, action: function() {
@@ -509,7 +578,46 @@
   // 当前表格内容归属的歌单索引：getTracks 返回前表格仍是上一个歌单的行，
   // 行级操作（播放/右键/调序/批量）必须校验归属，否则会用旧行索引操作新歌单
   CM._tablePlaylist = null;
+  // 表格数据的 contentVersion（插件 2.1.0 乐观锁）：getTracks 回包里带来，批量
+  // 删除 / 移动作 expectedVersion 传回 —— 行号快照与宿主真实状态并发变化（自动
+  // 歌单回填、foobar 自己的界面增删）时宿主拒绝（STALE_TARGET），我们重画而不是
+  // 按旧行号删错歌。旧宿主不回这个字段 → 保持 null → 参数缺省，行为与从前一致
+  CM._playlistVersion = null;
+  // 歌单页空态：图标 + 标题 + 副文案（与 .empty-illustration 同一观感，多一行副文案）。
+  // 此前是 table-empty 纯灰小字（正文还是内联样式），与全项目其它空态两种长相。
+  function playlistEmptyHTML(icon, title, sub) {
+    return '<div class="table-empty-illus">' + (icon || CM.icons.note) +
+      '<div class="table-empty-title">' + esc(title) + '</div>' +
+      (sub ? '<div class="table-empty-sub">' + esc(sub) + '</div>' : '') + '</div>';
+  }
+  /* 「一张歌单都没有」或「未选中歌单」的引导空态：switchTab（无歌单可恢复）、
+     boot 恢复失败、renderPlaylistView 的空缓存守卫三处共用。 */
+  CM.renderPlaylistEmptyState = function() {
+    els.playlistHeaderName.textContent = '播放列表';
+    els.playlistHeaderTag.textContent = 'PLAYLIST';
+    if (els.playlistHeaderMeta) els.playlistHeaderMeta.textContent = '';
+    els.plCover.onerror = null;
+    els.plCover.src = CM.DEFAULT_TRACK_COVER;
+    els.plCover.style.display = '';
+    if (state.batchSelected && state.batchSelected.size) {
+      state.batchSelected.clear();
+      CM._updateBatchBar();
+    }
+    CM._tablePlaylist = null;
+    CM._playlistVersion = null;
+    var hasLists = Array.isArray(CM.playlists) && CM.playlists.length > 0;
+    els.trackTbody.innerHTML = '<tr><td colspan="6">' + (hasLists
+      ? playlistEmptyHTML(CM.icons.note, '从左侧选择一个歌单', '或点「我的歌单」旁的 ＋ 新建一个')
+      : playlistEmptyHTML(CM.icons.note, '还没有歌单', '点左侧「我的歌单」旁的 ＋ 新建，或直接拖放音频文件到窗口')) + '</td></tr>';
+  };
+
   CM.renderPlaylistView = function(idx) {
+    // 歌单缓存已加载且一张都没有（首次使用 / 最后一张被删）：给引导空态，
+    // 不再向宿主要一个必然失败的列表（那会显示成"加载失败"）
+    if (Array.isArray(CM.playlists) && !CM.playlists.length) {
+      CM.renderPlaylistEmptyState();
+      return;
+    }
     var pl = (CM.playlists || []).find(function(p) { return p.index === idx; }) || {};
     els.playlistHeaderName.textContent = pl.name || '播放列表';
     els.playlistHeaderTag.textContent = pl.isAutoplaylist ? 'AUTOPLAYLIST' : 'PLAYLIST';
@@ -528,7 +636,7 @@
     // 请求在途：现有行属于旧歌单，行级操作一律拒绝。但**同一歌单的重载**保留旧值 ——
     // 行还是那些行（data-index 不变），而置空会让播放后的自动刷新期间出现几百毫秒的
     // "双击/右键没反应"死窗口（_tablePlaylist 守卫见 dblclick / contextmenu）。
-    if (CM._tablePlaylist !== idx) CM._tablePlaylist = null;
+    if (CM._tablePlaylist !== idx) { CM._tablePlaylist = null; CM._playlistVersion = null; }
     // 延迟加载指示器：API 快速返回（<150ms）时不闪烁，保留旧表格内容
     var cancelLoading = CM.delayedLoading(function() {
       if (loadId !== CM._playlistViewLoadId) return;
@@ -552,6 +660,7 @@
           CM.showToast('部分曲目未加载', '从第 ' + (start + 1) + ' 首起加载失败', 'error');
           return acc;
         }
+        if (r.contentVersion != null) CM._playlistVersion = r.contentVersion;
         var batch = CM.respTracks(r);
         acc = acc.concat(batch);
         state.playlistTracksTotal = r.total != null ? r.total : acc.length;
@@ -834,12 +943,25 @@
       return;
     }
     var items = indices.slice().sort(function(a, b) { return a - b; });
-    CM.api('playlist.removeTracks', { playlist: idx, items: items }).then(function(r) {
+    var rmParams = { playlist: idx, items: items };
+    if (idx === state.currentPlaylistIndex && CM._playlistVersion != null) {
+      rmParams.expectedVersion = CM._playlistVersion;
+    }
+    CM.api('playlist.removeTracks', rmParams).then(function(r) {
+      if (r && r.success === false && r.code === 'STALE_TARGET') {
+        // 行号快照过期（自动歌单回填 / 其它窗口增删过）：按真实状态重画，不猜
+        CM.showToast('歌单已变化', '本次删除未执行，请重新选择后再删', 'error');
+        if (state.batchSelected.size > 0) CM.clearBatchSelection();
+        if (idx === state.currentPlaylistIndex) CM.renderPlaylistView(idx);
+        if (onDone) onDone(false);
+        return;
+      }
       if (!r || r.success === false) {
         CM.showToast('删除失败', (r && r.error) ? r.error : '请稍后重试', 'error');
         if (onDone) onDone(false);
         return;
       }
+      if (r.contentVersion != null) CM._playlistVersion = r.contentVersion;
       if (state.batchSelected.size > 0) CM.clearBatchSelection();
       if (onDone) onDone(true);
     });
@@ -865,11 +987,19 @@
       CM.showToast('无法调整顺序', '请先点击已排序的表头取消排序', 'error');
       return Promise.resolve(null);
     }
-    return CM.api('playlist.moveTracks', { playlist: idx, items: indices, delta: delta }).then(function(r) {
+    var mvParams = { playlist: idx, items: indices, delta: delta };
+    if (CM._playlistVersion != null) mvParams.expectedVersion = CM._playlistVersion;
+    return CM.api('playlist.moveTracks', mvParams).then(function(r) {
+      if (r && r.success === false && r.code === 'STALE_TARGET') {
+        CM.showToast('歌单已变化', '本次移动未执行，列表已刷新', 'error');
+        CM.renderPlaylistView(idx);
+        return null;
+      }
       if (!r || r.success === false) {
         CM.showToast('移动失败', (r && r.error) ? r.error : '请稍后重试', 'error');
         return null;
       }
+      if (r.contentVersion != null) CM._playlistVersion = r.contentVersion;
       if (msg) CM.showToast(msg[0], msg[1] || null, 'success');
       return r;
     });
@@ -950,9 +1080,10 @@
     });
 
     if (!viewIndex.length) {
-      els.trackTbody.innerHTML = isFiltered
-        ? '<tr><td colspan="6"><div class="table-empty">没有匹配的曲目<br><span style="font-size:11.5px;opacity:0.7">清空筛选框即可回到整张歌单</span></div></td></tr>'
-        : '<tr><td colspan="6"><div class="table-empty">这个歌单还没有曲目<br><span style="font-size:11.5px;opacity:0.7">拖放音频文件到窗口即可添加</span></div></td></tr>';
+      els.trackTbody.innerHTML = '<tr><td colspan="6">' + (isFiltered
+        ? playlistEmptyHTML(CM.icons.note, '没有匹配的曲目', '清空筛选框即可回到整张歌单')
+        : playlistEmptyHTML(CM.icons.note, '这个歌单还没有曲目', '拖放音频文件到窗口即可添加')
+      ) + '</td></tr>';
       return;
     }
 
@@ -1161,6 +1292,10 @@
   CM.showTrackCtxMenu = function(x, y, track, ctx) {
     if (!track) return;
     var path = CM.trackPath(track);
+    // 在线曲目（QQ/网易云/B站直链）没有本地文件：文件类操作（复制文件本体、
+    // 播放统计、在资源管理器显示、写标签）要么必然失败要么没有意义，菜单里
+    // 置灰或隐藏并写明原因，别让用户对着"没反应"猜
+    var online = CM.isUrlPath ? CM.isUrlPath(path) : /^https?:\/\//i.test(String(path || ''));
     var inPlaylist = !!(ctx && ctx.playlist != null);
     var items = [
       { label: '播放', icon: CM.icons.play, action: function() {
@@ -1224,10 +1359,83 @@
       });
     } });
     items.push({ label: '评分', icon: CM.icons.star, submenu: ratingItems });
+    // 播放统计（2.2.0 的 playcount.get，需 foo_playcount）：右键就能看 播放次数 /
+    // 首末播放 / 入库时间。playcount.get 吃原生路径（页面行存 file:// URI，转一次）；
+    // 未装 foo_playcount 时数值全 0 —— 显示"从未播放"不算说谎。在线直链没有统计。
+    if (!online) {
+      items.push({ label: '播放统计', icon: CM.icons.info, action: function() {
+        var np = String(path || '').replace(/^file:\/\/\/?/i, '');
+        try { np = decodeURIComponent(np); } catch (e) {}
+        CM.getPlaycounts([np]).then(function(r) {
+          var it = r && r.results && r.results[0];
+          if (!r || r.success === false || !it || it.success === false) {
+            CM.showToast('读不到播放统计', (it && it.error) || '宿主没有返回统计', 'error');
+            return;
+          }
+          var d = function(v) { return v ? String(v).slice(0, 10) : ''; };
+          var sub = it.playCount > 0
+            ? '共播放 ' + it.playCount + ' 次 · 首播 ' + d(it.firstPlayed) + ' · 末播 ' + d(it.lastPlayed)
+            : '从未播放';
+          if (it.added) sub += ' · 入库 ' + d(it.added);
+          CM.showToast('播放统计 · ' + (CM.trackName(track) || ''), sub, null);
+        });
+      } });
+    }
+    // 复制 ▸：曲目信息 / 路径 / 文件本体（2.2.0 的 clipboard.writeFiles —— 复制后
+    // 可在资源管理器直接粘贴）。多选时作用于整批；在线曲目没有文件本体可复制。
+    var copyTracks = [track];
+    if (ctx && ctx.playlist != null && state.batchSelected.size >= 2) {
+      copyTracks = [];
+      state.batchSelected.forEach(function(bi) { if (state.trackCache[bi]) copyTracks.push(state.trackCache[bi]); });
+    }
+    var nativeOf = function(t) {
+      var p = String(CM.trackPath(t) || '').replace(/^file:\/\/\/?/i, '');
+      try { p = decodeURIComponent(p); } catch (e) {}
+      return p;
+    };
+    var localCopy = copyTracks.filter(function(t) {
+      var p = CM.trackPath(t);
+      return p && !(CM.isUrlPath ? CM.isUrlPath(p) : /^https?:\/\//i.test(String(p)));
+    });
+    var copyItems = [
+      { label: '曲目信息', action: function() {
+        var text = copyTracks.map(function(t) { return (CM.trackName(t) || '') + ' - ' + (CM.trackArtist(t) || ''); }).join('\n');
+        CM.apiOr('clipboard.write', { text: text }).then(function() {
+          CM.showToast('已复制曲目信息', copyTracks.length > 1 ? copyTracks.length + ' 首' : null, 'success');
+        }, function(e) { CM.failToast(e, '复制失败'); });
+      } },
+      { label: '文件路径', action: function() {
+        var text = copyTracks.map(nativeOf).join('\n');
+        CM.apiOr('clipboard.write', { text: text }).then(function() {
+          CM.showToast('已复制路径', copyTracks.length > 1 ? copyTracks.length + ' 条路径' : null, 'success');
+        }, function(e) { CM.failToast(e, '复制失败'); });
+      } },
+      // 富文本：html + 纯文本两种一起放剪贴板 —— Word / 邮件 / 支持格式的聊天框出表格，
+      // 纯文本目标（记事本等）自动退回普通行，两边都不丢
+      { label: '复制为表格', desc: '粘进 Word / 邮件等是排好的表格', action: function() {
+        var rows = copyTracks.map(function(t) {
+          return '<tr><td>' + CM.escHtml(CM.trackName(t) || '') + '</td><td>' + CM.escHtml(CM.trackArtist(t) || '') +
+                 '</td><td>' + CM.escHtml(t.album || '') + '</td><td>' + CM.formatTime(t.duration || 0) + '</td></tr>';
+        }).join('');
+        var html = '<table><tbody><tr><th>标题</th><th>艺人</th><th>专辑</th><th>时长</th></tr>' + rows + '</tbody></table>';
+        var text = copyTracks.map(function(t) { return (CM.trackName(t) || '') + ' - ' + (CM.trackArtist(t) || ''); }).join('\n');
+        CM.apiOr('clipboard.writeHTML', { html: html, plainText: text }).then(function() {
+          CM.showToast('已复制曲目表格', copyTracks.length > 1 ? copyTracks.length + ' 首' : null, 'success');
+        }, function(e) { CM.failToast(e, '复制失败'); });
+      } }
+    ];
+    if (localCopy.length) {
+      copyItems.push({ label: copyTracks.length > 1 ? '文件本体（' + localCopy.length + ' 首）' : '文件本体',
+                       desc: '复制后可在资源管理器粘贴', action: function() {
+        CM.apiOr('clipboard.writeFiles', { paths: localCopy.map(nativeOf) }).then(function(r) {
+          CM.showToast('已复制 ' + ((r && r.fileCount) || localCopy.length) + ' 个文件', '在资源管理器 Ctrl+V 粘贴', 'success');
+        }, function(e) { CM.failToast(e, '复制文件失败'); });
+      } });
+    }
+    items.push({ label: '复制', icon: CM.icons.copy, submenu: copyItems });
     items.push({ divider: true });
     // 在线曲目（QQ 音乐直链）没有本地文件：这两项点了必然失败（或静默无操作），
     // 直接置灰并写明原因，别让用户对着"没反应 / 写入失败"猜
-    var online = CM.isUrlPath ? CM.isUrlPath(path) : /^https?:\/\//i.test(String(path || ''));
     items.push({ label: '在资源管理器中显示', icon: CM.icons.folder, disabled: online,
                  desc: online ? '在线曲目没有本地文件' : '', action: function() {
       CM.api('shell.showInExplorer', { path: path });

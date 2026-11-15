@@ -434,12 +434,9 @@
             // 必须用 addPathsSequential：playlist.addPaths 由 foobar 按"添加文件"的
             // 方式解析，**行不保持给定顺序** —— 那样 index: base 播的未必是这批第一首
             return apiOr('playlist.addPathsSequential', { playlist: idx, paths: r.urls })
-              .then(function (res) {
-                if (res.success === false) throw new Error(res.error || '宿主拒绝写入歌单');
-                return apiOr('playlist.playTrack', { playlist: idx, index: base })
-                  .then(function (pr) {
-                    if (pr.success === false) throw new Error(pr.error || '播放请求被宿主拒绝');
-                  });
+              .then(function () {
+                // apiOr 已把失败信封转成 reject，这里不需要再判 success
+                return apiOr('playlist.playTrack', { playlist: idx, index: base });
               });
           });
       });
@@ -554,12 +551,13 @@
       var clipped = tracks.slice(0, IMPORT_MAX);
       var over = tracks.length - clipped.length;
       setStatus('「' + pl.name + '」共 ' + tracks.length + ' 首，正在解析音源（' +
-                clipped.length + ' 首，在线播放固定 ' +
+                clipped.length + ' 首，在线播放 ' +
                 (LEVEL_LABEL[NeteaseBridge.streamQuality()] || NeteaseBridge.streamQuality()) + '）…');
 
       // 批量解析：网易云一次请求能出 10 首，比逐首搜索快得多
-      // 注意用 streamQuality()：导入的曲目是要**播放**的，不能拿无损 FLAC 直链
-      // 交给宿主（CDN 的 Content-Type 不对，foobar 会报"不支持的格式或文件损坏"）
+      // forStream:true：导入的曲目是要**播放**的 —— flac 直链在桥接侧经
+      // streamifyUrl 整理成可流播形态（https + 探测过的镜像），整理不出回落 320K；
+      // 音质档位用 streamQuality()（跟随下拉框），与勾选播放同口径
       var urls = [], failed = [];
       return NeteaseBridge.resolveMany(clipped, NeteaseBridge.streamQuality(), { forStream: true }).then(function (r) {
         if (r.resolves && r.resolves.length) {
@@ -581,8 +579,8 @@
               // addPathsSequential：导入整个歌单时行顺序必须与原歌单一致，
               // addPaths 由 foobar 按"添加文件"的方式解析、不保序（导入后顺序会乱）
               return apiOr('playlist.addPathsSequential', { playlist: idx, paths: urls })
-                .then(function (res) {
-                  if (res.success === false) throw new Error(res.error || '宿主拒绝写入歌单');
+                .then(function () {
+                  // apiOr 已把失败信封转成 reject，这里不需要再判 success
                   if (base === 0) {
                     return apiOr('playlist.playTrack', { playlist: idx, index: 0 });
                   }

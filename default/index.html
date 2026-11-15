@@ -21,7 +21,7 @@ window.addEventListener('unhandledrejection', function (e) {
 </script>
 <link rel="stylesheet" href="css/variables.css?v=31">
 <link rel="stylesheet" href="css/layout.css?v=35">
-<link rel="stylesheet" href="css/components.css?v=43">
+<link rel="stylesheet" href="css/components.css?v=45">
 <link rel="stylesheet" href="css/utilities.css?v=32">
 </head>
 <body>
@@ -755,6 +755,9 @@ window.addEventListener('unhandledrejection', function (e) {
   <div class="np-viz-btn" id="npVizBtn" title="频谱显示：频谱条（点击切换）">
     <svg viewBox="0 0 24 24"><path d="M4 20V9"/><path d="M10 20V4"/><path d="M16 20v-8"/><path d="M22 20V6"/></svg>
   </div>
+  <div class="np-flow-btn" id="npFlowBtn" title="专辑河流：浏览并播放媒体库专辑（Esc 返回）">
+    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+  </div>
   <div class="np-container" id="npContainer">
     <!-- Vinyl / Artwork Side -->
     <div class="np-vinyl-side" id="npVinylSide">
@@ -811,6 +814,16 @@ window.addEventListener('unhandledrejection', function (e) {
           <span>暂无歌词</span>
         </div>
       </div>
+    </div>
+  </div>
+  <!-- 专辑河流（Coverflow）：沉浸页内部的 3D 专辑浏览，与唱片/歌词视图互斥显示；
+       hidden 属性自带 display 规则会被作者样式压过，.np-flow[hidden] 由 CSS 显式补回 -->
+  <div class="np-flow" id="npFlow" hidden>
+    <div class="np-flow-stage" id="npFlowStage"></div>
+    <div class="np-flow-info">
+      <div class="np-flow-name" id="npFlowName"></div>
+      <div class="np-flow-artist" id="npFlowArtist"></div>
+      <div class="np-flow-hint">←/→ 或滚轮浏览 · 回车 / 双击当前卡播放专辑 · Esc 返回</div>
     </div>
   </div>
   <!-- Progress Bar -->
@@ -887,33 +900,33 @@ window.addEventListener('unhandledrejection', function (e) {
 <script src="sdk/smp-compat.global.js?v=2000"></script>
 -->
 <script src="sdk/bridge.global.js?v=2000"></script>
-<!-- CloudMusic Theme v3.0.1 -->
-<script src="js/core.js?v=318"></script>
+<!-- CloudMusic Theme v3.1.0 -->
+<script src="js/core.js?v=323"></script>
 <script src="js/lyric-core.js?v=305"></script>
-<script src="js/playback-model.js?v=11"></script>
-<script src="js/ui.js?v=314"></script>
-<script src="js/ui-lyrics.js?v=318"></script>
-<script src="js/ui-playlist.js?v=319"></script>
+<script src="js/playback-model.js?v=17"></script>
+<script src="js/ui.js?v=316"></script>
+<script src="js/ui-lyrics.js?v=321"></script>
+<script src="js/ui-playlist.js?v=323"></script>
 <script src="js/ui-discover.js?v=305"></script>
-<script src="js/ui-library.js?v=310"></script>
-<script src="js/ui-queue.js?v=309"></script>
-<script src="js/ui-nowplaying.js?v=311"></script>
-<script src="js/ui-tags.js?v=305"></script>
+<script src="js/ui-library.js?v=321"></script>
+<script src="js/ui-queue.js?v=312"></script>
+<script src="js/ui-nowplaying.js?v=314"></script>
+<script src="js/ui-tags.js?v=306"></script>
 <script src="js/audio-viz.js?v=308"></script>
-<script src="js/controls.js?v=328"></script>
+<script src="js/controls.js?v=330"></script>
 <script src="js/online-common.js?v=309"></script>
 <script src="js/qqmusic-core.js?v=310"></script>
 <script src="js/qq-playlist-export.js?v=304"></script>
 <script src="js/ui-qqmusic.js?v=308"></script>
-<script src="js/netease-core.js?v=315"></script>
-<script src="js/ui-netease.js?v=314"></script>
-<script src="js/bilibili-core.js?v=6"></script>
+<script src="js/netease-core.js?v=316"></script>
+<script src="js/ui-netease.js?v=315"></script>
+<script src="js/bilibili-core.js?v=7"></script>
 <script src="js/ui-bilibili.js?v=6"></script>
 <script src="js/lyrics-sources.js?v=2"></script>
 <script src="js/lyrics-resolver.js?v=308"></script>
 <script src="js/artwork-resolver.js?v=305"></script>
-<script src="js/tray.js?v=4"></script>
-<script src="js/ui-settings.js?v=6"></script>
-<script src="js/app.js?v=315"></script>
+<script src="js/tray.js?v=6"></script>
+<script src="js/ui-settings.js?v=12"></script>
+<script src="js/app.js?v=321"></script>
 </body>
 </html>

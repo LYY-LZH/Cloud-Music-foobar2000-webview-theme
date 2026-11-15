@@ -8,7 +8,7 @@
 
   // 主题版本：界面上所有"显示版本号"的地方都读这一个常量，
   // 避免「更多」菜单、诊断面板、诊断报告各写一份后互相对不上。
-  CM.VERSION = '3.0.1';
+  CM.VERSION = '3.1.0';
 
   /* ============================================
    * API 包装器 — 出错时resolve null，调用方只需判空
@@ -72,7 +72,11 @@
     DISABLED: '该功能已被禁用',
     ACCESS_DENIED: '没有权限执行该操作',
     BUSY: '宿主正忙，稍后重试',
-    TRANSPORT: '与宿主通信失败'
+    TRANSPORT: '与宿主通信失败',
+    // 插件 2.1.0 起新增的三个码：调用 30 秒无应答 / 乐观锁过期 / 宿主仍在准备
+    TIMEOUT: '宿主应答超时（可能有慢操作占着宿主）',
+    STALE_TARGET: '列表已变化，本次操作未执行',
+    OPERATION_PENDING: '宿主正在准备（如媒体库还在加载）'
   };
   CM.errText = function(code) {
     return (code && CM.ERR_TEXT[code]) || code || '未知错误';
@@ -96,12 +100,15 @@
     LOCKED: 'locked',
     BUSY: 'busy',
     TRANSPORT: 'transport',
-    OPERATION_FAILED: 'host'
+    OPERATION_FAILED: 'host',
+    TIMEOUT: 'busy',
+    OPERATION_PENDING: 'busy',
+    STALE_TARGET: 'stale'
   };
   CM.ERR_KIND_LABEL = {
     unsupported: '宿主不支持', params: '参数被拒', origin: '来源被信任限制',
     missing: '目标不存在', locked: '目标被锁定', busy: '宿主忙',
-    transport: '通信失败', host: '宿主执行失败', unknown: '未知失败'
+    transport: '通信失败', host: '宿主执行失败', stale: '数据已过期', unknown: '未知失败'
   };
   CM.ERR_KIND_ADVICE = {
     unsupported: '升级 foo_ui_webview2 组件，或让该项在界面上自动隐藏',
@@ -112,6 +119,7 @@
     busy: '稍后重试',
     transport: '宿主可能正在忙或已退出，重试一次',
     host: '看 foobar2000 控制台里的组件日志',
+    stale: '界面会自动刷新，请重试刚才的操作',
     unknown: '带诊断报告反馈'
   };
   CM.errKind = function(code) {
@@ -263,6 +271,13 @@
      所以写入统一走这里：先挂监听再发起调用，收齐期望路径（或 4 秒无事件）后
      回一份 { ok, failed, unconfirmed }，由调用方决定怎么提示、要不要写缓存。
      unconfirmed = 宿主压根没发完成事件（老宿主）：不假装成功，也不当成失败。 */
+  /* 播放统计（2.2.0 的 playcount.get，需 foo_playcount）：一次拿 播放次数 / 首末
+     播放 / 入库时间 / 评分。paths 收**原生**路径（页面行存 file:// URI，调用方先
+     转换 —— 实测 playcount.get 吃 `E:\…` 形态）；未装 foo_playcount 时数值全 0。 */
+  CM.getPlaycounts = function(paths) {
+    return CM.api('playcount.get', { paths: paths || [] });
+  };
+
   CM.WRITE_CONFIRM_MS = 4000;
   CM.writeTags = function(method, params, paths) {
     var expect = {}, i;
@@ -281,7 +296,14 @@
       off = fb.on('metadata:writeComplete', function(e) {
         if (!e || !e.path || !(e.path in expect) || expect[e.path]) return;
         expect[e.path] = true; seen++;
-        if (e.success === false) failed.push({ path: e.path, code: e.code || '', error: e.error || e.status || '' });
+        if (e.success === false) {
+          var fErr = e.error || e.status || '';
+          // 2.2.0 起 WAV 不支持写非 ASCII 标签（宿主 details.reason=wavInfoNonAscii）：
+          // 这是格式限制不是故障，给一句能照着做的话，别让用户对着英文错误码猜
+          var hint = (e.code === 'NOT_SUPPORTED' || /wavInfoNonAscii/i.test(String(e.error || '') + String((e.details && e.details.reason) || ''))) &&
+            /\.wav$/i.test(String(e.path || '')) ? 'WAV 格式不支持写入中文等非 ASCII 标签（格式限制），可转成 FLAC/MP3 后再写' : '';
+          failed.push({ path: e.path, code: e.code || '', error: fErr, msg: hint });
+        }
         if (seen >= wantN) settle();
       });
       timer = setTimeout(settle, CM.WRITE_CONFIRM_MS);
@@ -576,7 +598,7 @@
    * ============================================ */
   var SETTINGS_KEY = 'cloudmusic-settings-v2';
   // 权威副本只在主窗口（小窗不写 localStorage），小窗经 window:message 回报。
-  CM.settings = { lyricsVisible: true, visualizer: true, tab: 'discover', volume: null, tilt3d: false, lyricModes: {}, lyricPicks: {}, lyricSources: {}, onlineNavOpen: false, spectrumMode: 'bars', popupMode: 'mini', popupGeom: null, rememberGuid: '', tray: false, lastPlaylist: '', contextGuid: '', historyMax: 20, historyOpen: false };
+  CM.settings = { lyricsVisible: true, visualizer: true, tab: 'discover', volume: null, tilt3d: false, lyricModes: {}, lyricPicks: {}, lyricSources: {}, onlineNavOpen: false, spectrumMode: 'bars', popupMode: 'mini', popupGeom: null, rememberGuid: '', tray: false, lastPlaylist: '', contextGuid: '', historyMax: 20, historyOpen: false, material: '', hotkeys: null };
   CM.loadSettings = function() {
     try {
       var raw = localStorage.getItem(SETTINGS_KEY);
@@ -594,6 +616,11 @@
     // 被改坏会让按路径读写抛 TypeError 或让某源被静默关掉
     if (!CM.settings.lyricPicks || typeof CM.settings.lyricPicks !== 'object' || Array.isArray(CM.settings.lyricPicks)) {
       CM.settings.lyricPicks = {};
+    }
+    // material 只认三档（'' = 关 / mica / acrylic）；hotkeys 被改坏会在热键恢复时抛 TypeError
+    if (CM.settings.material !== 'mica' && CM.settings.material !== 'acrylic') CM.settings.material = '';
+    if (!CM.settings.hotkeys || typeof CM.settings.hotkeys !== 'object' || Array.isArray(CM.settings.hotkeys)) {
+      CM.settings.hotkeys = null;   // null = 未配置过；ui-settings 的热键管理器会懒初始化
     }
     if (!CM.settings.lyricSources || typeof CM.settings.lyricSources !== 'object' || Array.isArray(CM.settings.lyricSources)) {
       CM.settings.lyricSources = {};
@@ -985,7 +1012,9 @@
   _colorImg.crossOrigin = 'anonymous';
   var _colorCanvas = document.createElement('canvas');
   _colorCanvas.width = 48; _colorCanvas.height = 48;
-  var _colorCtx = _colorCanvas.getContext('2d');
+  // willReadFrequently：每次换歌都 getImageData 回读，Chromium 对反复回读的画布
+  // 不加这个开关会一直发 console 警告（还走较慢的回读路径）
+  var _colorCtx = _colorCanvas.getContext('2d', { willReadFrequently: true });
   var _colorSize = 48;
   CM._accentHue = 0;              // --accent-h 的初始值（variables.css 里是 0）
 

@@ -82,6 +82,95 @@
       CM.doSearch(els.searchInput.value);
     }, 350));
 
+    // 搜索联想：library.getFieldValues 的会话内缓存 + 输入下拉（fixed 定位挂在 body，
+    // 不受搜索页滚动容器裁剪）。缓存随媒体库变更失效（ui-library 的常驻监听会调
+    // CM.invalidateSearchSuggest）；取值失败不缓存，下次输入重试。
+    var _sugCache = null;
+    CM.invalidateSearchSuggest = function() { _sugCache = null; };
+    function sugEnsure() {
+      if (_sugCache) return _sugCache;
+      _sugCache = Promise.all([
+        CM.api('library.getFieldValues', { field: 'artist', limit: 5000 }),
+        CM.api('library.getFieldValues', { field: 'album', limit: 5000 }),
+        CM.api('library.getFieldValues', { field: 'genre', limit: 5000 })
+      ]).then(function(rs) {
+        function pick(r) {
+          return (r && r.success !== false && Array.isArray(r.values)) ? r.values.filter(function(v) { return v && v.name; }) : [];
+        }
+        return { artist: pick(rs[0]), album: pick(rs[1]), genre: pick(rs[2]) };
+      }, function() {
+        _sugCache = null;
+        return { artist: [], album: [], genre: [] };
+      });
+      return _sugCache;
+    }
+    var sugBox = null;
+    function sugHide() { if (sugBox) { sugBox.hidden = true; sugBox.innerHTML = ''; } }
+    function sugShow(q) {
+      sugEnsure().then(function(cache) {
+        // 取值期间输入又变了：这次联想作废，别拿旧关键词的结果盖住新输入
+        if (els.searchInput.value.trim() !== q) return;
+        var key = q.toLowerCase();
+        var TYPES = [['artist', '艺人'], ['album', '专辑'], ['genre', '流派']];
+        var hits = [];
+        for (var t = 0; t < TYPES.length && hits.length < 24; t++) {
+          var arr = cache[TYPES[t][0]];
+          for (var i = 0; i < arr.length; i++) {
+            var nm = arr[i].name;
+            var at = nm.toLowerCase().indexOf(key);
+            if (at < 0) continue;
+            hits.push({ name: nm, count: arr[i].trackCount || 0, type: TYPES[t][1], rank: at === 0 ? 0 : 1 });
+            if (hits.length >= 24) break;
+          }
+        }
+        // 前缀命中排前，同档按曲目数（getFieldValues 本身就按曲目数降序，稳定复用）
+        hits.sort(function(a, b) { return a.rank - b.rank || b.count - a.count; });
+        hits = hits.slice(0, 8);
+        if (!hits.length) { sugHide(); return; }
+        if (!sugBox) {
+          sugBox = document.createElement('div');
+          sugBox.className = 'search-suggest';
+          sugBox.hidden = true;
+          document.body.appendChild(sugBox);
+          sugBox.addEventListener('mousedown', function(e) {
+            var it = e.target.closest('.search-suggest-item');
+            if (!it) return;
+            e.preventDefault();   // 点候选不让 input 失焦
+            els.searchInput.value = it.dataset.q;
+            CM.doSearch(it.dataset.q);
+            sugHide();
+          });
+          // 点外关闭（mousedown 捕获，早于 blur）
+          document.addEventListener('mousedown', function(e) {
+            if (!sugBox || sugBox.hidden) return;
+            if (e.target === els.searchInput || sugBox.contains(e.target)) return;
+            sugHide();
+          }, true);
+        }
+        var html = '';
+        for (var h = 0; h < hits.length; h++) {
+          html += '<div class="search-suggest-item" data-q="' + CM.escHtml(hits[h].name) + '">' +
+            '<span class="search-suggest-type">' + hits[h].type + '</span>' +
+            '<span>' + CM.escHtml(hits[h].name) + '</span>' +
+            '<span class="search-suggest-count">' + hits[h].count + ' 首</span></div>';
+        }
+        sugBox.innerHTML = html;
+        var rect = els.searchInput.getBoundingClientRect();
+        sugBox.style.left = rect.left + 'px';
+        sugBox.style.top = (rect.bottom + 6) + 'px';
+        sugBox.style.width = Math.max(rect.width, 260) + 'px';
+        sugBox.hidden = false;
+      });
+    }
+    els.searchInput.addEventListener('input', CM.debounce(function() {
+      var q = els.searchInput.value.trim();
+      if (!q) { sugHide(); return; }
+      sugShow(q);
+    }, 220));
+    els.searchInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') sugHide();
+    });
+
     // 新建歌单
     els.addPlaylistBtn.addEventListener('click', function() {
       CM.showModal({ title: '新建歌单', input: '', okText: '创建' }).then(function(name) {
@@ -1114,6 +1203,13 @@
     // 频谱显示开关（频谱条 → 声场 → 瀑布图 → 示波器 → 矢量示波器，点击循环；五种都画在那条频谱的位置上）
     if (els.npVizBtn) els.npVizBtn.addEventListener('click', function() {
       if (CM.spectrumMode) CM.spectrumMode.cycle();
+    });
+
+    // 专辑河流开关（沉浸页内的 3D 专辑浏览；交互与播放逻辑见 ui-nowplaying.js 的 flow 模块）
+    var npFlowBtn = CM.$('npFlowBtn');
+    if (npFlowBtn) npFlowBtn.addEventListener('click', function(e) {
+      e.stopPropagation();
+      CM.npFlowToggle();
     });
 
     // 播放控制

@@ -174,7 +174,7 @@
   <h1>CloudMusic 主题功能指南</h1>
   <p>一份覆盖全部功能的操作手册 — 从基础播放到标签编辑，帮助你充分利用 CloudMusic 主题的每一项能力。</p>
   <div class="hero-meta">
-    <div class="hero-meta-item">版本 <b>v3.0.1</b></div>
+    <div class="hero-meta-item">版本 <b>v3.1.0</b></div>
     <div class="hero-meta-item">作者 <b>灵芝含</b></div>
     <div class="hero-meta-item">SDK <b>foo_ui_webview2 2.0.0</b></div>
   </div>
@@ -221,41 +221,32 @@
       <svg viewBox="0 0 24 24"><path d="M3 3v4h2V5h2V3Z"/><path d="M7 3h12a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H3v-2"/><path d="M3 9v8"/><path d="M13 8h4"/><path d="M13 12h4"/><path d="M13 16h2"/><path d="M6 17l2 2 3-4"/></svg>
     </div>
     <div>
-      <div class="section-title">更新日志 · v3.0.1</div>
-      <div class="section-desc">在线直链时效 · 媒体库加载方式 · Bilibili 页（新增 / 封面 / 下载）—— 这里只列要点</div>
+      <div class="section-title">更新日志 · v3.1.0</div>
+      <div class="section-desc">适配 foo_ui_webview2 2.2.0 · 播放统计 · 全局热键 · 最常播放 · 复制 ▸ —— 这里只列要点</div>
     </div>
   </div>
   <div class="section-body">
-    <strong>v3.0.1 做了什么</strong>
+    <strong>v3.1.0 做了什么</strong>
     <ul>
-      <li><strong>「一首歌还没开始就自动跳到别的歌」修好了</strong>：根因是歌单 / 播放历史里存的是带签名时效的直链 —— 过期后宿主打不开就自动下一首，而点过去的那首同样过期，于是继续跳。现在播放前先判<strong>直链还剩多久</strong>（B 站读 <code>deadline</code>，QQ / 网易云用签发时间加保守窗口），<strong>新鲜就零请求原样播</strong>，只有真过期才解析一次；解析不出来会明说「这首在线曲目打不开」并<strong>停下</strong>。</li>
-      <li><strong>不再弹 foobar 自己的报错窗</strong>：死链不交给宿主，宿主就没有"打不开"的机会。所以「播放 › 弹出错误提示信息」保持你现在的设置即可，<strong>不需要</strong>全局关闭。</li>
-      <li><strong>媒体库点歌错位</strong>（"最近添加双击播到下一行"也是同一个原因）：行下标与过滤后的路径数组错位，现在做显式映射，没有可用路径的行会提示并中止。</li>
-      <li><strong>媒体库切页卡顿</strong>：卡顿不在"整库加载"，而在原来 2000 一页的串行重建 —— 现在一次整库请求（宿主留着缓存 + 工作线程构建），被拒 / 超时自动退回分页；每行封面的目录扫描并发上限 2 批。</li>
-      <li><strong>添加文件夹扫不到歌</strong>：旧实现依赖插件 2.0.0 下已不存在的兼容层，现在改用宿主 <code>file.exists</code> + <code>file.list</code>，失败原因如实提示。</li>
-      <li><strong>喜欢进「我喜欢的音乐」</strong>：爱心按钮与右键「评分」走同一条路 —— 评 5 星即加入歌单（没有就创建），4 星及以下 / 清除评分则移出（正在播放的那一首会跳过，避免打断播放）。</li>
-      <li><strong>一批状态类小毛病</strong>：B 站翻页回来「已选」数翻倍、下载在解析阶段点「停止」无效、上一首回溯遇到直链刷新会写重复历史、媒体库清空后仍显示旧列表、B 站搜索打断翻页后翻页按钮置灰 —— 都已修。</li>
-      <li><strong>QQ 音乐重播提示「找不到 / 像是要 VIP」</strong>：重解析直链时漏传了 songmid，接口对空 songmid 只回空直链（实测），于是每次重播都必然失败、还被误报成版权 / 会员限制。现在解析时把 songmid、时长与直链到期时间一并记住，重播按 songmid 精确重解析，老记录用「歌手 + 歌名 + 时长」重搜兜底。</li>
-      <li><strong>网易云「不登录能听、登录反而不行」</strong>：带登录 Cookie 的那条解析请求被服务端拒绝（Cookie 失效 / 账号受限），旧版却报成「无版权 / 需会员」。现在这类曲目会<strong>自动用匿名再要一次</strong>并提示「已自动改用匿名音源」；两边都拿不到时才报错，且提示指向「Cookie 可能已失效」。</li>
-      <li><strong>新增 Bilibili 在线音源页</strong>：搜索 / 贴链接或 BV 号播放 / 分 P / 固定歌单「B站音乐」，封面接进统一封面链路。</li>
-      <li><strong>Bilibili 也能下载</strong>：「下载选中」→ <code>&lt;配置目录&gt;\B站音乐下载\</code>，MP4 + 同名 <code>.lrc</code>（歌词由多源聚合匹配，匹配不上就不写）；长视频的多段 <code>durl</code> 自动拼接。</li>
+      <li><strong>适配插件 2.2.0</strong>：<code>replaceAllAndPlay</code> 保序恢复；页面保留键（Ctrl+←→ / Alt+↑↓ 不被 foobar 自己的快捷键抢占）；媒体库自动更新恢复常驻订阅。</li>
+      <li><strong>「最常播放」Top 10</strong>：媒体库概览按播放次数排榜（需 foo_playcount），旁边一行总播放 / 已播 / 未播 / 平均评分。</li>
+      <li><strong>右键「播放统计」</strong>：播放次数 / 首播 / 末播 / 入库时间，一眼看清。</li>
+      <li><strong>右键「复制 ▸」</strong>：曲目信息 / 文件路径 / <strong>文件本体</strong>（复制后资源管理器直接 Ctrl+V）；多选整批。</li>
+      <li><strong>复制为表格（富文本）</strong>：粘进 Word / 邮件是排好的表格，纯文本目标自动退回普通行。</li>
+      <li><strong>自动歌单「查看自动列表条件」</strong>：查询条件 / 排序 / 保持排序，点击即复制。</li>
+      <li><strong>全局热键</strong>：录制 Ctrl/Alt 组合（播放/暂停 · 上一首 · 下一首 · 停止），窗口未聚焦也生效；失败会说明是按键不合法还是被占用。</li>
+      <li><strong>窗口材质</strong>：Mica / 亚克力（Win11）；「游标跟随播放 / 播放跟随光标」接入 foobar 原生开关（互斥保护）。</li>
+      <li><strong>搜索联想</strong>：按 艺人 / 专辑 / 流派 提示高频值，点选直接搜。</li>
+      <li><strong>艺人专辑网格</strong>：艺人页按专辑展示封面与曲目数。</li>
+      <li><strong>细节三连</strong>：队列行显示来源歌单、播放历史「已播」徽标、沉浸页专辑河流（Coverflow）；DSP 预设切换与自动歌单原生编辑器入口。</li>
+      <li><strong>「双击播错歌」全链修复</strong>：播放定位改为读回真实行号（宿主保序与否都正确）+ 视图按路径稳定排序 + 重绘避让交互；队列 / 歌单批量操作接入乐观锁；托盘左键走宿主原生显隐。</li>
+      <li><strong>歌单空态统一</strong>：没有歌单 / 空歌单 / 筛选零命中，三种空态图标 + 标题 + 副文案。</li>
+      <li><strong>媒体库增量同步</strong>：文件增删改只拉变化的那几首原地更新，不再整库重拉。</li>
     </ul>
-    <p style="margin:16px 0 8px"><strong>v3.0.0 做了什么</strong></p>
+    <p style="margin:14px 0 8px"><strong>历史版本</strong>（一行一条；完整说明见 <a href="../docs/changelog.md" style="color:var(--accent)">docs/changelog.html</a> —— 主题目录外的仓库文件，<strong>不随主题打包</strong>，打包版里没有它）</p>
     <ul>
-      <li><strong>适配插件 2.0.0</strong>：修掉 3 处会被严格校验拒绝的调用（进度跳转 / 「全部歌曲」/ 专辑封面），并接上实时声场、播放时钟、歌单 GUID、无边框小窗等新能力。</li>
-      <li><strong>入口重排</strong>：「更多」菜单收成四段（歌词 / 窗口 / 音频 / foobar2000，沿用旧版分区顺序），长内容折叠成组；低频项与排障工具搬进新增的「设置与工具」页（不占侧边栏）。</li>
-      <li><strong>频谱五种显示</strong>：频谱条 / 声场 / 瀑布图 / 示波器 / 矢量示波器，配统一的可视化调度器（多视图各自注册、暂停即停）。</li>
-      <li><strong>小窗（迷你播放器 / 歌词窗）</strong>：独立窗口 —— 主窗口最小化 / 进托盘时不再跟着消失，Win+D 也不收走；无响应自动关掉重开、无封面时用默认封面；排版、居中、DPI 尺寸、跨窗口设置归属都已修好。</li>
-      <li><strong>常驻托盘</strong>：图标 + 原生菜单（页面挂起时播放控制仍可用），左键单击 / 双击都把主窗口叫回前台。</li>
-      <li><strong>歌词与在线音源</strong>：歌词多源（LRCLIB / 网易云 / QQ）+ 候选面板；页内「QQ 音乐」「网易云」「Bilibili」三个在线音源。</li>
-      <li><strong>修掉的一批问题</strong>：播放顺序点了「随机」实际下发成 shuffle-tracks、图标读不回真实档位（宿主 order 是序号不是 foobar 标志位）；换歌瞬间「保存歌词 / 嵌入标签」会把上一首的原文写进新曲目；「流派」页因多传参数被宿主整单拒绝（插件更新后接口变严格）；筛选零命中会显示整张歌单、筛选框的 × 常驻；「上次听歌的歌单」按名称恢复失效；进度条不可跳转时没有视觉反馈；DPI 变化只第一次能感知；小窗置顶按钮在失败时也点亮。</li>
-      <li><strong>移除自绘桌面歌词</strong>：桌面歌词仍走 ESLyric（显示 / 置顶 / 锁定 / 重置）。</li>
-      <li><strong>移除试听功能</strong>：右键的「试听（不加入歌单）/ 停止试听」与页内 <code>&lt;audio&gt;</code>、JIT 无痕试听整条链路全部删除（试听会与正常播放抢音频输出，宿主又没有可靠的失败信号），原位置换成「添加到插入队列」。</li>
-      <li><strong>插队队列（双轨制）</strong>：右侧改名并明确分工 —— 中间大列表 = <b>播放上下文</b>（双击才切换），右侧 = <b>插队队列</b>（原生播放队列，播完一首移一首、播完回上下文）。双击中间列表 /「播放全部」= 切上下文并清空插队队列；右键「下一首播放」插队首、「添加到插入队列」追加队尾，两者都不动中间列表；媒体库 / 发现 / 搜索的列表会映射进一个不显示在侧栏的 <code>_MediaLibraryContext_</code> 歌单，播放时不再顶掉你正在看的歌单内容。</li>
-      <li><strong>播放历史（新）</strong>：插队队列<strong>上方</strong>的一行「播放历史」按钮，点开是从旧到新的只读时间线（默认 20 条、设置页可调，展开状态记住），最新一条紧贴"正在播放"，整条抽屉自上而下就是「过去 → 现在 → 接下来」；「上一首」优先回溯它，历史行双击回到那一条。</li>
-    </ul>
-    <p style="margin:14px 0 8px"><strong>历史版本</strong>（一行一条；完整说明见 <a href="../docs/changelog.html" style="color:var(--accent)">docs/changelog.html</a> —— 主题目录外的仓库文件，<strong>不随主题打包</strong>，打包版里没有它）</p>
-    <ul>
+      <li><strong>v3.0.1</strong> · 在线直链时效（新鲜零请求）· 媒体库整库加载 · Bilibili 页（封面 / 下载）</li>
+      <li><strong>v3.0.0</strong> · 适配 2.0.0 · 双轨制播放模型 · 设置与工具页 · 频谱五种 · 小窗与托盘</li>
       <li><strong>v2.5.4</strong> · 新增「网易云」页（第二个在线音源）</li>
       <li><strong>v2.5.3</strong> · QQ 音乐页内桥接（新架构）</li>
       <li><strong>v2.5.3</strong> · 在线音源稳定性与性能（修 Bug）</li>
@@ -921,7 +912,7 @@
 
 <!-- Footer -->
 <div class="footer">
-  <p class="footer-author">CloudMusic 主题 v3.0.1 · 作者：灵芝含</p>
+  <p class="footer-author">CloudMusic 主题 v3.1.0 · 作者：灵芝含</p>
   <p>基于 foo_ui_webview2 SDK 2.0.0 · foobar2000 v2</p>
   <p>感谢使用，享受音乐</p>
 </div>

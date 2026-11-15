@@ -211,9 +211,9 @@
       }
       if (c.failed.length) {
         if (_tagCtx === ctx) els.tagEditorHint.textContent = '写入失败，请重试';
-        CM.showToast('标签写入失败',
-          CM.errKindLabel(c.failed[0].code) + (c.failed[0].error ? ' · ' + c.failed[0].error : ''),
-          'error');
+        // failed[].msg = 特定格式的专门提示（如 WAV 非 ASCII 限制），优先于笼统的错误码
+        var f0 = c.failed[0];
+        CM.showToast('标签写入失败', f0.msg || (CM.errKindLabel(f0.code) + (f0.error ? ' · ' + f0.error : '')), 'error');
         return;
       }
       var track = ctx.tracks[0];

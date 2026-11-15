@@ -33,6 +33,7 @@
       if (state.lyricsVisible) CM.setLyricsVisible(false, true);
     } else {
       els.npOverlay.classList.remove('open');
+      if (CM.npFlowToggle) CM.npFlowToggle(false);   // 退出沉浸页顺带关掉专辑河流
       if (CM.sched) CM.sched.release('np');
       stopWave();
       document.body.style.overflow = '';
@@ -119,8 +120,13 @@
   };
   CM.loadNpWaveform = function(path) {
     var el = els.npWaveform; if (!el) return;
-    if (!path) { el.classList.add('hide'); return; }
-    if (_waveCache[path]) { el.innerHTML = _waveCache[path]; el.classList.remove('hide'); return; }
+    // 两个早退分支都必须清掉在途请求：留着的话，旧曲目迟到的 ready/failed 回包
+    // 会走到"路径对不上"分支，把当前正在显示的波形条 hide 掉
+    if (!path) { _wavePending = null; el.classList.add('hide'); return; }
+    if (_waveCache[path]) {
+      _wavePending = null;
+      el.innerHTML = _waveCache[path]; el.classList.remove('hide'); return;
+    }
     if (!_waveBound) {
       _waveBound = true;
       fb.on('audio:fullWaveformReady', function(e) {
@@ -139,8 +145,10 @@
         } else el.classList.add('hide');
       });
       fb.on('audio:fullWaveformFailed', function(e) {
-        // 迟到的旧任务失败不能清掉新任务的 pending（否则新任务 ready 时被丢弃）
-        if (e && e.taskId && _wavePending && e.taskId !== _wavePending.taskId) return;
+        // 迟到的旧任务失败不能清掉新任务的 pending（否则新任务 ready 时被丢弃）；
+        // 没有在途请求时（缓存命中 / 无路径早退）更不能把正在显示的波形藏掉
+        if (!e || !_wavePending) return;
+        if (e.taskId && e.taskId !== _wavePending.taskId) return;
         _wavePending = null; el.classList.add('hide');
       });
     }
@@ -717,4 +725,163 @@
   });
 
   CM.npActiveLyricIndex = -1;
+
+  /* ============================================
+   * 专辑河流（Coverflow）：沉浸页内的 3D 专辑浏览
+   * --------------------------------------------
+   * 数据 = library.getAlbums（不带封面，行自带 firstTrackPath）；封面按需
+   * artwork.getFb2kUrlByPath（会话内缓存，FIFO 上限 120 张）。
+   * 交互 = ←/→ / Home/End / 滚轮（节流）浏览，点击侧卡聚焦、点当前卡或回车播放
+   * （CM.playAlbum → playAllTracks → 双轨制的 _MediaLibraryContext_，不写用户歌单）。
+   * 放在沉浸页**内部**而不是新开顶层覆盖层：贴靠区域命中测试由沉浸页的开合统一
+   * 处理，不引入"看不见的最大化按钮"那类问题（AGENTS 第五节）。
+   * ============================================ */
+  var flow = { on: false, idx: 0, albums: null };
+  var _flowCovers = {};   // path -> dataUrl
+  var _flowCoverN = 0;
+  var FLOW_COVER_MAX = 120;
+  function flowCachePut(p, u) {
+    if (_flowCovers[p]) return;
+    if (_flowCoverN >= FLOW_COVER_MAX) { _flowCovers = {}; _flowCoverN = 0; }   // 简单 FIFO：满了整表清
+    _flowCovers[p] = u;
+    _flowCoverN++;
+  }
+  CM.npFlowInvalidate = function() { flow.albums = null; };   // 媒体库变更时由 ui-library 的监听调
+  function flowEls() {
+    return {
+      box: CM.$('npFlow'), stage: CM.$('npFlowStage'),
+      name: CM.$('npFlowName'), artist: CM.$('npFlowArtist'), btn: CM.$('npFlowBtn')
+    };
+  }
+  function flowAlbums() {
+    if (flow.albums) return Promise.resolve(flow.albums);
+    // 不传 sort（宿主默认即按名称；2.0.0 的 getAlbums 参数面更窄，少传更稳）
+    return CM.api('library.getAlbums', { limit: 2000 }).then(function(r) {
+      flow.albums = (r && r.success !== false && r.albums) || [];
+      return flow.albums;
+    });
+  }
+  function flowApplyCover(al, artEl) {
+    var p = al.firstTrackAbsolutePath || al.firstTrackPath || '';
+    if (!p || !artEl) return;
+    if (_flowCovers[p]) {
+      artEl.style.backgroundImage = 'url("' + _flowCovers[p] + '")';
+      artEl.classList.add('has-art');
+      return;
+    }
+    CM.api('artwork.getFb2kUrlByPath', { path: p, type: 'front', maxSize: 320 }).then(function(r) {
+      var u = r && r.available !== false && r.dataUrl;
+      if (!u) return;
+      flowCachePut(p, u);
+      // 卡片可能在请求途中被整批重画：按归属校验，别贴到错误的卡上
+      if (artEl.dataset.path !== p) return;
+      artEl.style.backgroundImage = 'url("' + u + '")';
+      artEl.classList.add('has-art');
+    });
+  }
+  function flowTransform(off) {
+    var x = off * 200, z = -Math.abs(off) * 180;
+    var rY = off === 0 ? 0 : (off < 0 ? 30 : -30);
+    var op = Math.max(0.22, 1 - Math.abs(off) * 0.17);
+    return 'transform:translate3d(' + x + 'px,0,' + z + 'px) rotateY(' + rY + 'deg);opacity:' + op + ';z-index:' + (10 - Math.abs(off));
+  }
+  function flowRender() {
+    var E = flowEls();
+    if (!E.box || !flow.on) return;
+    var list = flow.albums;
+    if (!list) {
+      E.stage.innerHTML = '<div class="np-flow-empty">加载专辑中…</div>';
+      return;
+    }
+    var n = list.length;
+    if (!n) { E.stage.innerHTML = '<div class="np-flow-empty">媒体库还没有专辑</div>'; return; }
+    flow.idx = Math.max(0, Math.min(n - 1, flow.idx));
+    var W = 5;   // 当前两侧各 5 张（超出屏幕的自然裁掉）
+    var parts = [];
+    for (var off = -W; off <= W; off++) {
+      var i = flow.idx + off;
+      if (i < 0 || i >= n) continue;
+      var al = list[i] || {};
+      var p = al.firstTrackAbsolutePath || al.firstTrackPath || '';
+      parts.push('<div class="np-flow-card' + (off === 0 ? ' np-flow-card-cur' : '') + '" data-i="' + i + '" style="' + flowTransform(off) + '">' +
+        '<div class="np-flow-art" data-path="' + esc(p) + '"></div>' +
+        '<div class="np-flow-cap">' + esc(al.name || al.album || '未知专辑') + '</div></div>');
+    }
+    E.stage.innerHTML = parts.join('');
+    var cur = list[flow.idx] || {};
+    E.name.textContent = cur.name || cur.album || '未知专辑';
+    E.artist.textContent = (cur.albumArtist || cur.artist || '') + (cur.year ? ' · ' + cur.year : '') + ' · ' + n + ' 张专辑';
+    // 封面懒取：可见的都取（约 11 张），命中缓存的立即贴上
+    var cards = E.stage.querySelectorAll('.np-flow-card');
+    for (var c = 0; c < cards.length; c++) {
+      var ci = parseInt(cards[c].dataset.i, 10);
+      if (!list[ci]) continue;
+      flowApplyCover(list[ci], cards[c].querySelector('.np-flow-art'));
+    }
+  }
+  function flowMove(d) {
+    var list = flow.albums || [];
+    if (!list.length) return;
+    var next = flow.idx + d;
+    if (next < 0 || next >= list.length) return;
+    flow.idx = next;
+    flowRender();
+  }
+  function flowPlayAt(i) {
+    var al = (flow.albums || [])[i];
+    if (!al) return;
+    CM.playAlbum(al.name || al.album || '', al.albumArtist || al.artist || '');
+  }
+  CM.npFlowToggle = function(force) {
+    flow.on = force !== undefined ? !!force : !flow.on;
+    var E = flowEls();
+    if (!E.box) return;
+    E.box.hidden = !flow.on;
+    if (E.btn) E.btn.classList.toggle('active', flow.on);
+    if (flow.on) {
+      flowRender();
+      flowAlbums().then(function() { flowRender(); });   // 异步取到专辑后重画一次
+    } else {
+      E.stage.innerHTML = '';
+    }
+  };
+  // 键盘/滚轮/点击。键盘走捕获阶段：Esc 要先关河流而不是关沉浸页，←/→ 也不能
+  // 再落到全局键盘里变成快进/快退（initKeyboard 的滚动寻址）。
+  CM.runOnce('npFlowKeys', function() {
+    document.addEventListener('keydown', function(e) {
+      if (!flow.on) return;
+      switch (e.key) {
+        case 'ArrowLeft': e.preventDefault(); e.stopPropagation(); flowMove(-1); break;
+        case 'ArrowRight': e.preventDefault(); e.stopPropagation(); flowMove(1); break;
+        case 'Home': e.preventDefault(); e.stopPropagation(); flow.idx = 0; flowRender(); break;
+        case 'End': e.preventDefault(); e.stopPropagation(); if (flow.albums) { flow.idx = flow.albums.length - 1; flowRender(); } break;
+        case 'Enter': e.preventDefault(); e.stopPropagation(); flowPlayAt(flow.idx); break;
+        case 'Escape': e.preventDefault(); e.stopPropagation(); CM.npFlowToggle(false); break;
+      }
+    }, true);
+    var stageEl = CM.$('npFlowStage');
+    if (stageEl) {
+      var lastWheel = 0;
+      stageEl.addEventListener('wheel', function(e) {
+        if (!flow.on) return;
+        e.preventDefault();
+        var now = Date.now();
+        if (now - lastWheel < 140) return;   // 触控板/滚轮一帧连发，节流避免一次转十张
+        lastWheel = now;
+        flowMove(e.deltaY > 0 ? 1 : -1);
+      }, { passive: false });
+    }
+    var boxEl = CM.$('npFlow');
+    if (boxEl) {
+      boxEl.addEventListener('click', function(e) {
+        var card = e.target.closest('.np-flow-card');
+        if (!card || !flow.albums) return;
+        var i = parseInt(card.dataset.i, 10);
+        if (isNaN(i)) return;
+        if (i === flow.idx) { flowPlayAt(i); return; }   // 点当前卡 = 播放
+        flow.idx = i;
+        flowRender();
+      });
+    }
+  });
 })();

@@ -337,7 +337,7 @@
     var opts = {
       // 带版本号：popup.html 自己也改了（结构/CSS）时，避免 WebView2 命中旧页面
       // 却加载了新的 popup.js —— 两边版本对不上会出现元素找不到的怪问题
-      url: 'popup.html?mode=' + m + '&v=13',
+      url: 'popup.html?mode=' + m + '&v=16',
       title: 'CloudMusic ' + cfg.label,
       width: g.w,
       height: g.h,

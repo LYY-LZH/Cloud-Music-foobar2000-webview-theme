@@ -39,15 +39,46 @@
     CM.api('window.focus');
   }
 
+  // 左键原生显隐（插件 2.1.0 的 tray.setClickAction = toggleMainWindow）：宿主直接
+  // 切换主窗口显/隐，主窗口页面深挂起也响应 —— 旧方案靠 tray:click 事件路由，
+  // 主窗口那页挂起后只能靠小窗页兜底。原生模式下 tray:click 不再派发、
+  // tray:doubleClick 仍广播（宿主只切换一次），JS 侧路由停用；小窗页经
+  // cm:trayNative 共享键同步停用（popup.js 读它），否则双击时 JS 的兜底 focus
+  // 会把刚隐藏的主窗口又叫回来。失败（旧宿主 / 面板模式）回退事件路由，不影响开关。
+  var _nativeClick = false;
+  function pushNativeFlag(on) {
+    try {
+      if (fb.sharedState && typeof fb.sharedState.set === 'function') {
+        fb.sharedState.set('cm:trayNative', { on: !!on }, false, 12 * 3600 * 1000);
+      }
+    } catch (e) {}
+  }
+  function applyNativeClick() {
+    if (!CM.caps.has('tray.setClickAction')) {
+      // 旧宿主（含从 2.1.0 回退的情形）也要把共享键清掉：标志带 12 小时 TTL，
+      // 残留的 on:true 会让小窗页压住自己的托盘兜底 focus
+      pushNativeFlag(false);
+      return Promise.resolve(false);
+    }
+    return CM.apiOr('tray.setClickAction', { action: 'toggleMainWindow' }).then(function(r) {
+      _nativeClick = !!r && r.success !== false;
+      pushNativeFlag(_nativeClick);
+      return _nativeClick;
+    }, function() { _nativeClick = false; pushNativeFlag(false); return false; });
+  }
+
   function bindEvents() {
     if (_bound || !fb || typeof fb.on !== 'function') return;
     _bound = true;
-    // 左键单击 / 双击图标 = 把主窗口叫回前台（右键由组件弹菜单，不经页面）
+    // 左键单击 / 双击图标 = 把主窗口叫回前台（右键由组件弹菜单，不经页面）。
+    // 原生显隐接管后停用：toggle 模式下 click 不派发、doubleClick 仍广播但宿主
+    // 已切换过一次，再 focus 会把刚隐藏的窗口叫回来
     fb.on('tray:click', function(e) {
+      if (_nativeClick) return;
       if (e && e.button !== undefined && e.button !== 0) return;
       revealMain();
     });
-    fb.on('tray:doubleClick', revealMain);
+    fb.on('tray:doubleClick', function() { if (!_nativeClick) revealMain(); });
     fb.on('playback:trackChanged', pushTooltip);
     fb.on('playback:stateChanged', pushTooltip);
     fb.on('playback:stopped', pushTooltip);
@@ -99,6 +130,9 @@
       }).then(function() {
         return setHiddenToTray(true);
       }).then(function() {
+        // 左键交给宿主原生显隐（2.1.0+；旧宿主自动跳过并保持事件路由）
+        return applyNativeClick();
+      }).then(function() {
         CM.settings.tray = true;
         CM.saveSettings();
         CM.showToast('已开启常驻托盘', '最小化 / 关闭时隐藏到托盘；托盘菜单可显示窗口或退出', 'success');
@@ -117,6 +151,10 @@
         return CM.apiOr('tray.destroy');
       }).then(function() {
         _created = false;
+        // destroy 会把点击动作重置回 event 模式，共享标志同步撤掉，
+        // 小窗页的托盘兜底才能重新接管
+        _nativeClick = false;
+        pushNativeFlag(false);
         CM.settings.tray = false;
         CM.saveSettings();
         CM.showToast('已关闭常驻托盘', '最小化 / 关闭恢复为普通行为', 'success');
@@ -136,6 +174,9 @@
     restore: function() {
       if (!supported()) return Promise.resolve(false);
       if (CM.settings.tray) return CM.tray.enable();
+      // 托盘是关的，原生点击必然也该是关的：上一轮会话（哪怕异常退出）残留的
+      // 共享标志在这里清掉，小窗页的托盘兜底 focus 不会被压住
+      pushNativeFlag(false);
       // 复位失败不阻断启动（这里在 boot 的 promise 链上，不能让它变成未处理的拒绝）
       return setHiddenToTray(false).then(function() { return false; }, function(e) {
         CM.failToast(e, '无法复位「隐藏到托盘」');

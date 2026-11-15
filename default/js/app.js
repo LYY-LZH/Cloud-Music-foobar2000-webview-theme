@@ -59,6 +59,8 @@
       CM.state.playingPlaylistIndex = newPl;
       CM.state.playingTrackIndex = ti && ti.index != null ? ti.index : -1;
       CM.refreshPlayingMarks();
+      // 光标跟随播放（设置页开关）：换曲后把可视表格滚到正在播放那一行
+      if (CM.state.cursorFollow && CM.scrollToPlayingRow) CM.scrollToPlayingRow();
       if (changed) CM.loadPlaylists();
     }).catch(function() { /* 静默忽略 */ });
   }
@@ -214,6 +216,12 @@
       if (CM.state.queueOpen) CM.renderQueue();
     });
 
+    // foobar 把曲目记为「已播放」（播满 60 秒，或播到结尾且至少播过 1/3 —— 与
+    // 播放统计同一次判定）→ 播放历史里那一行打 ✓
+    fb.on('playback:itemPlayed', function(track) {
+      if (CM.history && CM.history.markPlayed) CM.history.markPlayed(track && (track.track || track));
+    });
+
     // 输出设备切换（如接入解码器）会打断宿主侧的频谱计算管线，但页面仍持有旧订阅句柄，
     // 导致频谱流永久中断（直到刷新页面）。这里直接重启订阅（音频可视化模块内部另有
     // "播放中 N 秒没有帧" 的看门狗兜底）——持有者计数不受影响。
@@ -225,6 +233,9 @@
 
     // 播放列表结构变化 → 刷新侧栏 + 当前列表视图
     var refreshPlaylistUI = CM.debounce(function() {
+      // 歌单结构可能被外部改动（宿主界面 / 其它窗口）：上下文"路径 → 行号"映射
+      // 随之行号失效，弃用快路径，下一次双击重新读回
+      if (CM._ctxSynced) CM._ctxSynced = null;
       CM.loadPlaylists();
       if (CM.state.currentTab === 'playlist' && CM.state.currentPlaylistIndex >= 0) {
         CM.renderPlaylistView(CM.state.currentPlaylistIndex);
@@ -289,7 +300,37 @@
       // 能力探测：拉一次宿主方法表，新功能据此显隐（失败保持"未知"，不误藏功能）
       var capsP = (CM.caps && CM.caps.init) ? CM.caps.init() : Promise.resolve();
       // 常驻托盘：等能力表回来再按设置恢复（旧宿主上 supported() 为假，自动跳过）
-      capsP.then(function() { if (CM.tray && CM.tray.restore) CM.tray.restore(); });
+      capsP.then(function() {
+        if (CM.tray && CM.tray.restore) CM.tray.restore();
+        // 窗口材质与全局热键同样依赖能力表（旧宿主自动跳过），各自恢复持久化状态
+        if (CM.applyMaterial && CM.settings.material) CM.applyMaterial(CM.settings.material);
+        if (CM.hotkeys && CM.hotkeys.restore) CM.hotkeys.restore();
+        // 插件 2.2.0 起：页面聚焦时含 Ctrl/Alt/Win 的组合先走 foobar 自己的快捷键
+        // 绑定 —— 把主题用到的组合登记为「页面保留键」，不与用户的 foobar 快捷键互抢
+        // （保留列表随页面重载清空，boot 重挂；录制热键期间临时 all:true，见 ui-settings）
+        if (CM.caps.has('keyboard.setReservedKeys')) {
+          // 键名是宿主侧语法（Win32 风）：方向键写作 Left/Up，不认 e.key 的 ArrowLeft
+          CM.RESERVED_KEYS = ['Ctrl+Left', 'Ctrl+Right', 'Alt+Up', 'Alt+Down'];
+          CM.api('keyboard.setReservedKeys', { keys: CM.RESERVED_KEYS });
+        }
+        // 两个「跟随」同时开启会互相触发（光标跟着播放走、播放跟着光标跳，宿主文档
+        // 明说通常互斥）—— 启动读到同时开启时自动关掉「播放跟随光标」并提示一次，
+        // 否则表现为"播着播着自己乱跳"
+        if (CM.caps.has('config.getCursorFollowPlayback')) {
+          CM.api('config.getCursorFollowPlayback').then(function(rc) {
+            CM.state.cursorFollow = !!(rc && rc.enabled);
+            return CM.api('config.getPlaybackFollowCursor').then(function(rp) {
+              CM.state.playbackFollow = !!(rp && rp.enabled);
+              if (CM.state.cursorFollow && CM.state.playbackFollow) {
+                return CM.apiOr('config.setPlaybackFollowCursor', { enabled: false }).then(function() {
+                  CM.state.playbackFollow = false;
+                  CM.showToast('已关闭「播放跟随光标」', '它与「光标跟随播放」同时开启会互相触发、来回跳曲', null);
+                });
+              }
+            });
+          }).catch(function() {});
+        }
+      });
       // 缩放比变化（换显示器 / 改系统缩放 / 页面缩放）——供依赖 DPR 的布局重算
       if (CM.watchDpi) CM.watchDpi();
       syncInitialState();
@@ -322,6 +363,9 @@
             CM.state.currentPlaylistIndex = use;
             CM.loadPlaylists(); // 刷新侧栏”当前歌单”高亮
             if (CM.state.currentTab === 'playlist') CM.renderPlaylistView(use);
+          } else if (CM.state.currentTab === 'playlist' && CM.renderPlaylistEmptyState) {
+            // 一张歌单都没有（或没恢复出任何一张）：给引导空态而不是空白
+            CM.renderPlaylistEmptyState();
           }
         });
       });

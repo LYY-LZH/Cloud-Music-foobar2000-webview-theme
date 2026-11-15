@@ -72,9 +72,13 @@
     });
   };
 
-  // 视图签名：标题 + 长度 + 首尾路径（内容变了签名就变）
+  // 视图签名：标题 + **全量路径**（顺序敏感）。旧实现只比 首/尾/长度 —— 实测
+  // （插件 2.1.0）library.getAll 每次重取的顺序可能不同：媒体库视图被重取后
+  // 中段重排、首尾长度不变，弱签名照样匹配 → 快路径拿新顺序的行号去播旧顺序
+  // 的上下文，必跳到别的歌。改成全量 join 后，任何重排都会miss签名 → 整体重建
+  // （顺序没变时字符串相等，快路径照常生效）。
   function ctxSig(title, paths) {
-    return (title || '') + '|' + paths.length + '|' + (paths[0] || '') + '|' + (paths[paths.length - 1] || '');
+    return (title || '') + '\u001f' + paths.join('\u001e');
   }
 
   /* 视图重建串行化：replaceAllAndPlay 要把整张视图写进上下文歌单（三千首时宿主
@@ -127,28 +131,55 @@
         if (next) CM.playContextList(next.tracks, next.index, next.title, next.opts);
         return;
       }
-      CM._ctxSynced = { sig: sig, title: title || '' };
-      if (opts.queueClear !== false) CM.clearUpNext();
+      // _ctxSynced（含路径→行号映射）在 replaceAll 的读回之后统一写入，这里不再碰
       if (opts.onDone) opts.onDone(true);
       if (next) CM.playContextList(next.tracks, next.index, next.title, next.opts);
     }
     CM.ensureContextPlaylist().then(function(idx) {
       if (idx == null || idx < 0) { finish(false, null); return; }
+      // 清插队队列放在**起播之前**：插件 2.1.0 起，queue.clear 落在起播窗口内会与
+      // 宿主 JIT 队列的"起播尝试接纳"竞态 —— 实测（MCP 复现）表现为起播后自己跳到
+      // 列表里另一首（stop reason starting_another）。清空本来就属于"切上下文"，
+      // 放到起播前语义也更顺；代价是起播失败时队列已清，可接受。
+      // （opts.queueClear === false 的调用方维持原样不碰队列。）
+      var clearP = (opts.queueClear !== false) ? CM.clearUpNext() : Promise.resolve();
+      clearP.then(function() {
       function replaceAll() {
+        // ⭐ 插件 2.1.0 实测（MCP 复现）：replaceAllAndPlay **不保序** —— 给定
+        // [Eat You, Duvet, APT, 5_20AM]，落盘变成 [5_20AM, APT, Duvet, Eat You]
+        // （按文件名排），playIndex 按给定序解释就播到别的歌。改用：
+        // autoPlay:false 先落盘 → 读回上下文建立「路径 → 真实行号」映射 →
+        // playTrack 点击那一行。"播哪首"只有读回这一份权威；映射缓存进
+        // _ctxSynced 给快路径免读回复用。宿主将来若恢复保序，读回结果不变，写法仍对。
         CM.api('playlist.replaceAllAndPlay', {
-          playlist: idx, paths: paths, playIndex: startIndex, autoPlay: true, stopFirst: true
-        }).then(function(r) { finish(!(r && r.success === false), r); },
-          // invoke 本身 reject（桥接超时 / 方法不存在）时也要收尾：
-          // 否则 ctxBusy 永远是 true，之后每一行双击都被塞进 ctxWaiting 再也不播
-          function(e) { finish(false, { error: (e && e.message) || '宿主无响应' }); });
+          playlist: idx, paths: paths, playIndex: startIndex, autoPlay: false, stopFirst: true
+        }).then(function(r) {
+          if (r && r.success === false) { finish(false, r); return; }
+          readContextRowMap(idx).then(function(rowOf) {
+            var row = rowOf[paths[startIndex]];
+            // 读回里找不到点击的那一首 = 写入没有按预期落盘（桥接级失败被 CM.api 吞成
+            // null、或宿主静默跳过了这条路径）。退回 startIndex 就是"点这首播那首"的
+            // 旧行为，宁可报错也不猜；此时映射不可信，_ctxSynced 不写
+            if (row == null) { finish(false, { error: '上下文写入后读不回这一首，可能文件已被移除' }); return; }
+            CM._ctxSynced = { sig: sig, title: title || '', idx: idx, rowOf: rowOf };
+            CM.api('playlist.playTrack', { playlist: idx, index: row }).then(
+              function(r2) { finish(!(r2 && r2.success === false), r2); },
+              function(e) { finish(false, { error: (e && e.message) || '宿主无响应' }); });
+          }, function(e) { finish(false, { error: (e && e.message) || '读不回上下文歌单' }); });
+        }, function(e) { finish(false, { error: (e && e.message) || '宿主无响应' }); });
       }
-      // 同一份视图、且上下文歌单已在活动位：只定位播放 ——
-      // 避免"在同一列表里连点几首"每次都把歌单清空重填（播放列表会被反复重建）
-      if (CM._ctxSynced && CM._ctxSynced.sig === sig) {
+      // 同一份视图、且上下文歌单已在活动位：按上次读回的「路径 → 行号」映射只定位
+      // 播放 —— 行号**不能**用给定序的 mapped（宿主落盘顺序 ≠ 给定顺序，见上），
+      // 也避免"在同一列表里连点几首"每次都把歌单清空重填
+      if (CM._ctxSynced && CM._ctxSynced.sig === sig && CM._ctxSynced.idx === idx && CM._ctxSynced.rowOf) {
         CM.api('playlist.getActive').then(function(a) {
           var act = a && (a.index != null ? a.index : a.playlist);
           if (act === idx) {
-            CM.api('playlist.playTrack', { playlist: idx, index: startIndex }).then(function(r) {
+            var row = CM._ctxSynced.rowOf[paths[startIndex]];
+            // 映射里查不到（上下文被外部改动而事件还没送到）：缓存不可信，
+            // 退回整体重建，由重建路径自己的守卫兜底
+            if (row == null) { replaceAll(); return; }
+            CM.api('playlist.playTrack', { playlist: idx, index: row }).then(function(r) {
               finish(!(r && r.success === false), r);
             }, function(e) { finish(false, { error: (e && e.message) || '宿主无响应' }); });
           } else {
@@ -158,6 +189,7 @@
         return;
       }
       replaceAll();
+      });
     }, function(e) { finish(false, { error: (e && e.message) || '建不出上下文歌单' }); });
   };
 
@@ -169,6 +201,27 @@
       return !(r && r.success === false);
     });
   };
+
+  // 读回上下文歌单全部行，建「路径 → 行号」映射。插件 2.1.0 起 replaceAllAndPlay
+  // 落盘顺序 ≠ 给定的 paths 顺序（宿主自行重排），行号只能以读回为准。
+  // 单次 count 按 500 档分页（与 ui-playlist 的 PL_CHUNK 同档）。
+  function readContextRowMap(idx) {
+    var rowOf = Object.create(null);
+    function step(start) {
+      return CM.api('playlist.getTracks', { playlist: idx, start: start, count: 500 }).then(function(r) {
+        if (!r || r.success === false) throw new Error((r && r.error) || '读不回上下文歌单');
+        var rows = CM.respTracks(r);
+        for (var i = 0; i < rows.length; i++) {
+          var p = CM.trackPath(rows[i]);
+          if (p && rowOf[p] == null) rowOf[p] = rows[i].index != null ? rows[i].index : start + i;
+        }
+        var total = r.total != null ? r.total : (start + rows.length);
+        if (rows.length && start + rows.length < total) return step(start + rows.length);
+        return rowOf;
+      });
+    }
+    return step(0);
+  }
 
   /* 统一「播放这一行」入口（列表双击 / 右键「播放」）：
      · 歌单行（playlist + index）→ 该歌单就是 Context：切活动歌单 + 定位播放 + 清空插队队列
@@ -197,6 +250,8 @@
   // 不让 foobar 去静默跳歌。
   function playPlaylistRow(plIndex, rowIndex) {
     function startRow() {
+      // 清插队队列放在起播之前（JIT 竞态说明同 playContextList；失败也要起播）
+      CM.clearUpNext().then(function() {
       CM.api('playlist.getActive').then(function (a) {
         var act = a && (a.index != null ? a.index : a.playlist);
         if (act === plIndex) return null;
@@ -204,8 +259,9 @@
       }).then(function () {
         return CM.apiOr('playlist.playTrack', { playlist: plIndex, index: rowIndex });
       }).then(function () {
-        CM.clearUpNext();
+        // 成功后无需再清（起播前已清）
       }, function (e) { CM.failToast(e, '播放失败'); });
+      });
     }
     CM.api('playlist.getTracksAt', { playlist: plIndex, rows: [rowIndex] }).then(function (r) {
       var path = CM.trackPath(CM.respTracks(r)[0]);
@@ -216,9 +272,14 @@
           return;
         }
         // 地址没变（本来就新鲜 / 解析出来是同一个）→ 交给宿主播歌单里那一行，
-        // 播放上下文保持不变；地址换了才走"游离曲"，歌单里的旧行原样留着
+        // 播放上下文保持不变；地址换了才走"游离曲"，歌单里的旧行原样留着。
+        // 游离曲分支同样要清插队队列（与正常路径同一契约：双击歌单行 = 切上下文
+        // + 清空插队队列），否则队列里的旧插队曲会在这首播完后突然接上。
+        // 必须先清再插：clear 只清待播项、不打断当前曲；要是在 playNow 之后清，
+        // 刚插进去那条还没算"播放中"，有被一并清掉的竞态窗口。
         if (!rr.refreshed) { startRow(); return; }
-        CM.playFreshPath(rr.path);
+        var go = function() { CM.playFreshPath(rr.path); };
+        CM.clearUpNext().then(go, go);
       });
     }, startRow);
   }
@@ -533,6 +594,24 @@
       this.cursor = this.items.length - 1;
       this.save();
     },
+    // foobar 把曲目记为「已播放」（playback:itemPlayed：播满 60 秒，或播到结尾且
+    // 至少播过 1/3 —— 与播放统计同一次判定）→ 给最近的历史行打 ✓。在线直链被刷新
+    // 后路径会变（见上 note），路径对不上时按歌名/歌手认。只查 cursor 与其前一条：
+    // trackChanged 与 itemPlayed 的到达顺序不保证，再往前就没有意义了。
+    markPlayed: function(track) {
+      if (!this.items.length || this.cursor < 0) return false;
+      var path = CM.trackPath(track);
+      var tName = CM.trackName(track) || '';
+      var tArtist = CM.trackArtist(track) || '';
+      for (var i = this.cursor; i >= 0 && i >= this.cursor - 1; i--) {
+        var it = this.items[i];
+        if (!it || it.played) continue;
+        var same = it.path === path ||
+          (!!tName && it.title === tName && (!tArtist || !it.artist || it.artist === tArtist));
+        if (same) { it.played = true; this.save(); return true; }
+      }
+      return false;
+    },
     // 回溯：cursor 往前找第一首不同曲目并播放（找不到返回 false → 交回 Context 上一首）
     prev: function() {
       var curPath = CM.trackPath(CM.currentTrack);
@@ -604,7 +683,7 @@
         '<div class="queue-item-title">' + esc(it.title || it.path) + '</div>' +
         '<div class="queue-item-artist">' + esc(it.artist || '') + '</div>' +
         '</div>' +
-        '<span class="queue-hist-time">' + fmtClock(it.at) + '</span>' +
+        '<span class="queue-hist-time">' + (it.played ? '<span class="hist-played" title="foobar 已计入播放统计">✓</span>' : '') + fmtClock(it.at) + '</span>' +
         '</div>'
       );
     }

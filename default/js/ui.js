@@ -394,7 +394,12 @@
     _tabNavItems.forEach(function(el) { el.classList.toggle('active', el.dataset.tab === tab); });
     _tabMainTabs.forEach(function(el) { el.classList.toggle('active', el.dataset.tab === tab); });
     _tabContents.forEach(function(el) { el.classList.toggle('active', el.id === TAB_IDS[tab]); });
-    if (tab === 'playlist' && state.currentPlaylistIndex >= 0) CM.renderPlaylistView(state.currentPlaylistIndex);
+    if (tab === 'playlist') {
+      if (state.currentPlaylistIndex >= 0) CM.renderPlaylistView(state.currentPlaylistIndex);
+      // 一张歌单都没有（缓存已加载）：给引导空态，而不是留一块空白。
+      // 启动早期歌单缓存还没回来（不是数组），这里不渲染 —— boot 的恢复链收尾时会补
+      else if (Array.isArray(CM.playlists) && !CM.playlists.length && CM.renderPlaylistEmptyState) CM.renderPlaylistEmptyState();
+    }
     if (tab === 'library') CM.renderLibrary();
     if (tab === 'search') setTimeout(function() { els.searchInput.focus(); }, 60);
     if (tab === 'settings' && CM.renderSettings) CM.renderSettings();

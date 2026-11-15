@@ -241,7 +241,15 @@
        - 网易云各镜像对 Content-Type 的标注不一致（第 15 轮只测到 m701/m801）：
          m701/m801 标 audio/mpeg，m704/m804 标 application/octet-stream。
      · 结论：无损流播 = https + 非 audio/mpeg 的镜像（streamifyUrl 探测把关，
-       过不了关回落 320K）。本函数恢复为「跟随用户档位」。 */
+       过不了关回落 320K）。本函数恢复为「跟随用户档位」。
+       · 2026-11-15 复测（第三十五轮，起因：用户反馈 VIP 曲拿到 320K）：CDN 的
+         vuutv 签名已绑定 host —— 把 m7/m8 的直链改写到任何镜像一律 400/403/404
+         （改写这条路死了）；但**能否无损流播本来就看 CDN 分桶**：m804 等桶原生
+         下发的直链标 octet-stream，https 化即过闸（晴天/起风了/乌梅子酱实测全过）；
+         ymusic 老桶（m7/m8，如求佛）把 .flac 标成 audio/mpeg —— 过不了闸回落
+         320K。「audio/mpeg → MP3 解码器 → 必死」这道关当轮复确认仍然成立：把
+         https+audio/mpeg 的 flac 直塞宿主，缓冲 ~5 秒后跳歌（audio.getStreamInfo
+         报 codec=MP3 bitrate=320 才是终审，播放位置短暂推进只是缓冲，别被骗）。 */
   function streamQuality() {
     return getQuality();
   }
@@ -297,8 +305,11 @@
 
   /* 无损直链 → foobar **能流播**的形态；整理不出来返回 ''（调用方回落 320K）。
      两道关（见 streamQuality 注释里的实测）：① 换 https（明文 http 的 FLAC
-     停滞）；② 镜像标的 Content-Type 不能是 audio/mpeg（foobar 会选错解码器）。
-     用 probeStream 探 16 字节把关，镜像不行就在已验证可用的镜像里换。 */
+     停滞）；② Content-Type 不能是 audio/mpeg（foobar 按它选解码器，flac 会被
+     派给 MP3 解码器）。用 probeStream 探 16 字节把关，原 host 不行再试镜像。
+     注意：2026-11-15 起签名绑定 host，镜像改写全部 400 —— 这条链只对"原生就
+     下发到好桶（如 m804，标 octet-stream）"的直链有意义，坏桶（ymusic/m7/m8，
+     标 audio/mpeg）无解，只能如实回落 320K；镜像表留作原 host 形态变化的保险。 */
   var STREAM_MIRRORS = ['m804', 'm704'];
   function probeStreamable(u) {
     return probeStream(u).then(function (p) {

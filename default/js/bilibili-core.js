@@ -232,6 +232,7 @@
   ];
   var SIGN_TTL = 6 * 3600 * 1000;
   var _sign = { imgKey: '', subKey: '', at: 0 };
+  var _signPending = null;
 
   function mixinKey(img, sub) {
     var orig = String(img || '') + String(sub || '');
@@ -244,7 +245,11 @@
     if (!force && _sign.imgKey && _sign.subKey && (Date.now() - _sign.at) < SIGN_TTL) {
       return Promise.resolve(_sign);
     }
-    return ensureBuvid().then(function () {
+    // 在途去重：签名未就绪时并发的多个 WBI 请求（如进页立刻搜索 + 解析）只发一份 nav。
+    // 失败清掉在途标记，下一个请求照常重试；-403 重签（force）加入在途请求即可 ——
+    // 那份请求本来就是新取的密钥，不必再打一次。
+    if (_signPending) return _signPending;
+    _signPending = ensureBuvid().then(function () {
       return getJson(API + '/x/web-interface/nav', { headers: headers(), ms: 12000, tag: 'nav' });
     }).then(function (j) {
       // 未登录时 code = -101，但 wbi_img 照常给 —— 只取密钥，不要求登录态
@@ -258,7 +263,14 @@
       }
       _sign = { imgKey: keyOf(img.img_url), subKey: keyOf(img.sub_url), at: Date.now() };
       return _sign;
+    }).then(function (s) {
+      _signPending = null;
+      return s;
+    }, function (e) {
+      _signPending = null;
+      throw e;
     });
+    return _signPending;
   }
 
   function wbiQuery(params, sign) {

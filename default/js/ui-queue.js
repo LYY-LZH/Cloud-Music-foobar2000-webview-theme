@@ -73,17 +73,18 @@
     if (_qDragIndex >= 0) { CM._queueRefreshPending = true; return; }
     CM._renderQueueNow();
     // 已有内容时延迟 150ms 才显示 loading：queue.get 通常即时返回，避免每次事件都闪一下转圈；
-    // 首次（无缓存）立即 loading，保证空抽屉的视觉反馈
+    // 首次（缓存为空，含真·空队列）立即 loading，保证空抽屉的视觉反馈
     var loadingShown = false;
     var cancelLoading = CM.delayedLoading(function() {
       loadingShown = true;
       els.queueList.innerHTML = CM.loadingHTML('');
-    }, CM._queueItems ? 150 : 0);
+    }, (CM._queueItems && CM._queueItems.length) ? 150 : 0);
     CM.api('queue.get').then(function(r) {
       cancelLoading();
       if (CM._queueRebuilding) return;
       if (_qDragIndex >= 0) { CM._queueRefreshPending = true; return; } // 取数期间用户又开始了拖拽
       var items = (r && (r.items || r.queue || r.tracks)) || [];
+      if (r && r.contentVersion != null) CM._queueVersion = r.contentVersion;
       CM._queueItems = items; // 缓存完整队列（拖拽排序时据此生成新顺序）
       CM._queueCount = items.length;
       els.queueCount.textContent = items.length ? items.length + ' 首' : '';
@@ -101,9 +102,17 @@
       // 预转义曲目字段，避免循环内重复调用 esc()
       var escItems = items.map(function(it) {
         var t = it.track || it;
+        // 来源歌单：2.1.0 起队列行自带 playlist/playlistItem 坐标（插队来源是歌单时
+        // 才有）；内部歌单（上下文容器 / 宿主影子歌单）不标，避免噪音
+        var src = '';
+        if (typeof it.playlist === 'number' && it.playlist >= 0) {
+          var row = CM.playlistRow ? CM.playlistRow(it.playlist) : null;
+          if (row && !CM.isInternalPlaylist(row)) src = row.name || '';
+        }
         return {
           name: esc(CM.trackName(t)),
-          artist: esc(CM.trackArtist(t))
+          artist: esc(CM.trackArtist(t)),
+          src: src
         };
       });
       // 内容签名未变则跳过重渲染（queueChanged 事件频繁但内容未必变化；签名含全部渲染输入）
@@ -119,7 +128,7 @@
           '<span class="queue-item-idx">' + (i + 1) + '</span>' +
           '<div class="queue-item-info">' +
           '<div class="queue-item-title">' + t.name + '</div>' +
-          '<div class="queue-item-artist">' + t.artist + '</div>' +
+          '<div class="queue-item-artist">' + t.artist + (t.src ? '<span class="queue-item-src"> · 来自「' + esc(t.src) + '」</span>' : '') + '</div>' +
           '</div>' +
           '<button class="queue-item-del" title="移出队列"><svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>' +
           '</div>'
@@ -180,12 +189,19 @@
       if (CM._queueRebuilding) return;
       var idx = parseInt(btn.closest('.queue-item').dataset.i, 10);
       if (isNaN(idx)) return;
-      // 移除失败（索引越界 / 宿主忙）要如实提示，并把列表重画回真实状态
-      CM.apiOr('queue.remove', { index: idx }).then(function() {
+      // 移除失败（索引越界 / 宿主忙）要如实提示，并把列表重画回真实状态。
+      // expectedVersion：按渲染快照里的 queueIndex 写，播放推进出队会让索引
+      // 前移 —— 版本对不上宿主直接拒绝，总比删错条目好
+      var rmParams = { index: idx };
+      if (CM._queueVersion != null) rmParams.expectedVersion = CM._queueVersion;
+      CM.apiOr('queue.remove', rmParams).then(function(res) {
+        if (res && res.contentVersion != null) CM._queueVersion = res.contentVersion;
         CM.renderQueue();
         CM.refreshQueueBadge();
       }, function(e) {
-        CM.failToast(e, '移出队列失败');
+        // 版本过期不算失败：抽屉按真实队列重画即可，用户再点一次
+        if (e && e.code === 'STALE_TARGET') CM.showToast('队列已变化', '列表已刷新，请重试', 'error');
+        else CM.failToast(e, '移出队列失败');
         CM.renderQueue();
         CM.refreshQueueBadge();
       });
@@ -285,6 +301,11 @@
   // newOrder[i] = 新位置上原条目的索引；来源信息（歌单引用 / 路径）保持原样
   CM._queueRebuilding = false;
   CM._queueItems = [];
+  // 最近一次 queue.get / 队列变更回包里的 contentVersion（插件 2.1.0 乐观锁）：
+  // 写操作作 expectedVersion 传回，宿主发现队列已被播放推进/其它窗口改过就拒绝
+  // （STALE_TARGET），我们重读重画而不是按旧 queueIndex 盲写。旧宿主不回这个
+  // 字段 → 保持 null → 参数缺省，行为与从前一致
+  CM._queueVersion = null;
   CM.reorderQueue = function(newOrder) {
     var items = CM._queueItems || [];
     var n = items.length;
@@ -314,6 +335,14 @@
       CM.refreshQueueBadge();
       if (err) CM.showToast('调整失败', err, 'error');
       else CM.showToast('已调整队列顺序', null, 'success');
+    }
+    // 版本过期的收尾：与 finish 的区别是不假装成功 —— 队列在拖拽期间被宿主
+    // 推进/修改过，这次重排整体作废，重读重画后让用户重新拖
+    function staleFinish() {
+      CM._queueRebuilding = false;
+      CM.renderQueue();
+      CM.refreshQueueBadge();
+      CM.showToast('队列已变化', '本次顺序调整未生效，请重新拖拽', 'error');
     }
     // 回退路径（旧宿主没有 queue.setContents 时）：clear + 逐项按来源重新入队
     function legacyRebuild() {
@@ -369,10 +398,22 @@
       slots.push({ queueIndex: qi });
     }
     if (allSlots) {
-      return CM.api('queue.setContents', { items: slots }).then(function(r) {
-        if (r && r.success !== false) { finish(null); return true; }
+      var scParams = { items: slots };
+      if (CM._queueVersion != null) scParams.expectedVersion = CM._queueVersion;
+      return CM.api('queue.setContents', scParams).then(function(r) {
+        // 版本过期（拖拽期间播完一首出队 / 其它窗口改了队列）时绝不能走
+        // legacyRebuild：那会按旧快照"清空+重加"，把宿主刚消费掉的新队列状态
+        // 整个冲掉 —— 作废重画即可
+        if (r && r.success === false && r.code === 'STALE_TARGET') { staleFinish(); return true; }
+        if (r && r.success !== false) {
+          if (r.contentVersion != null) CM._queueVersion = r.contentVersion;
+          finish(null); return true;
+        }
         return legacyRebuild();
-      }, function() { return legacyRebuild(); });
+      }, function(e) {
+        if (e && e.code === 'STALE_TARGET') { staleFinish(); return true; }
+        return legacyRebuild();
+      });
     }
     return legacyRebuild();
   };
